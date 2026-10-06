@@ -164,11 +164,14 @@ def summary_markdown(runs: pd.DataFrame, expl: list[dict]) -> str:
             lines.append(f"| {e['model']} | {e['n_decisions']} | {e['valid_output_rate']:.1%} | "
                          f"{e['fact_check_pass_rate']:.1%} | {e['direction_error_rate']:.1%} | "
                          f"{e['comparison_error_rate']:.1%} | {e['mean_latency_s']:.1f} |")
-        lines += ["", "Fact-check pass = numbers, claims, up/down wording and claims about today's software / the cost "
-                  "all match the data (first pass without the comparison check: "
-                  + ", ".join(f"{e['fact_check_pass_rate_v1']:.1%}" for e in expl) + "). "
-                  "A manual read of 25 explanations found 9 with a factual error the first-pass check missed "
-                  "(all where the rule and today's software disagree); the comparison check now catches 7 of them.", ""]
+        lines += ["", "Fact-check pass = numbers, claims, up/down wording, nurse codes, and claims about today's "
+                  "software and the stated cost all match the data. Two prompts were run on the same 400 decisions and "
+                  "re-scored with the same final check: v1 (results/archive_e6_prompt_v1/) 66.2%, v2 (this run, with "
+                  "per-option totals and more/fewer/same labels) 66.2%; the prompt change did not raise accuracy. "
+                  "When the rule and today's software pick the same option, 93% pass; when they differ, 64%. "
+                  "Manual reads: 9 of 25 v1 explanations had errors the first check missed; 7 of 15 passing v2 "
+                  "explanations (differ cases) had errors, 3 of which the final check now catches. The check is a "
+                  "safety net, not a guarantee: the planner still reads the explanation.", ""]
     return "\n".join(lines)
 
 

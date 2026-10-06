@@ -137,13 +137,20 @@ def comparison_errors(text, payload: dict) -> list[str]:
         return []
     cdesc, odesc = (chosen.get("description") or "").lower(), (ortec.get("description") or "").lower()
     out: list[str] = []
+    known = {nd["nurse"] for o in payload["options"] for nd in o.get("nurses", [])}
+    known |= {c.get("nurse") for o in payload["options"] for c in o.get("changes", [])}
+    for m in _NURSE_MENTION.finditer(text):
+        n = canon_nurse(m.group(0))
+        if n not in known and n != canon_nurse(payload.get("event", {}).get("absent", "")):
+            out.append(f"unknown nurse: {n}")
     start = 0
     for end in [m.end() for m in _SENT_END.finditer(text)] + [len(text)]:
         sent, start = text[start:end], end
         for clause in _CLAUSE.split(sent.lower().replace("\u2019", "'")):
             has_chosen = bool(cdesc) and cdesc in clause
             about_ortec = (("today's software" in clause or (bool(odesc) and odesc in clause)) and not has_chosen
-                           and not re.search(r"than (?:today's software|“)", clause))  # "X more than today's" is about X
+                           # "X adds more than today's software" is about X, unless a "which/that" clause follows
+                           and not re.search(r"than (?:today's software|“[^”]*”)(?!\s*'?s?,?\s*(?:which|that))", clause))
             for m, pat in _METRIC_PHRASE.items():
                 hit = re.search(pat, clause)
                 if not hit:
