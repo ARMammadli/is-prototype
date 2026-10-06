@@ -1,5 +1,4 @@
 {
-  "mode": "rule_explains",
   "weights": {
     "QR": 3.0,
     "N": 1.0,
@@ -12,6 +11,5 @@
   "squared": true,
   "model": "qwen3:8b",
   "ui_timeout_s": 30,
-  "eval_timeout_s": 60,
-  "_mode_options": "rule_explains (default: formula decides, GenAI explains) | genai_chooser (experimental arm C: GenAI picks)"
+  "eval_timeout_s": 60
 }

@@ -138,6 +138,10 @@ rule chose, the runner-up, and the option today's software would pick: fewest ch
 left) and those options. {DEFINITIONS}
 For every nurse, 'more' lists what goes up for that nurse, 'less' lists what goes down, and load_change is
 the load after minus the load before (positive = more load, negative = relieved).
+what_each_option_adds gives, per option, the total change for all its nurses (0 = it adds none; negative =
+it removes some). chosen_vs_todays_software says whether the chosen option adds more, fewer or the same
+of each item than today's software's choice. These are the ONLY source for any statement about what
+today's software's choice would do and about the cost of the chosen option.
 Write 2 to 3 short sentences (about 60 words) that say:
 1. who gets extra work in the chosen option, and who is relieved (if anyone);
 2. why the chosen option fits the policy better than today's software's choice (if
@@ -145,6 +149,8 @@ Write 2 to 3 short sentences (about 60 words) that say:
 3. the cost, if any, for example more nurses changed or more last-minute call-ins.
 Rules:
 - {DIRECTION_RULE} A nurse whose item is in 'less' is relieved of it; never say that nurse gets more of it.
+- Never say today's software's choice adds an item when what_each_option_adds shows 0 or less for it.
+  Never call something a cost of the chosen option unless chosen_vs_todays_software says 'more' for it.
 - Refer to options by their description, never by their id. Refer to nurses as in the data.
 - Only use numbers that appear in the JSON. Do not cite weights or ranks.
 - Every before/after number you mention about a nurse must also be listed in claims.
@@ -197,5 +203,17 @@ def build_explain_payload(ctx, scored, policy: dict, policy_text: str | None = N
                      "same_as_todays_software": base_top is top},
         "options": options,
     }
+    adds = {o["id"]: _option_adds(o) for o in options}
+    payload["what_each_option_adds"] = {o["role"]: adds[o["id"]] for o in options}
+    if base_top is not top:
+        c, t = adds[top.option.id], adds[base_top.option.id]
+        payload["chosen_vs_todays_software"] = {
+            k: ("more" if c[k] > t[k] else "fewer" if c[k] < t[k] else "the same") for k in c}
     payload["comparison"] = build_comparison(payload)
     return payload
+
+
+def _option_adds(o: dict) -> dict:
+    out = {PLAIN_METRIC[m]: round(sum(nd["after"][m] - nd["before"][m] for nd in o["nurses"]), 1) for m in METRICS}
+    out["nurses changed"] = o["n_changes"]
+    return out

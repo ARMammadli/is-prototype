@@ -3,7 +3,6 @@
 Same 5 wards (seeds 0-4), same base rosters, sick calls and seeds for every arm:
   A  ORTEC-like       fewest changes, most contract hours left
   B  rule-ranked      hospital formula (main design); GenAI only explains, never changes the choice
-  C  GenAI-chooser    qwen3:8b choices from E5, replayed from results/e5_decisions.jsonl (no new LLM calls)
   B_sn3 / B_sn6       sensitivity: weight on short-notice changes ("disturb as few people") 1.5 -> 3 -> 6
 
 Subcommands:
@@ -32,7 +31,7 @@ METRICS = ["QR_total", "nurses_qr_ge3_28d", "max_qr", "unfilled", "SN_total", "c
 LABELS = {"QR_total": "Quick returns", "nurses_qr_ge3_28d": "Nurses with 3+ QR in 28 d",
           "max_qr": "Max QR, one nurse", "unfilled": "Unfilled shifts", "SN_total": "Short-notice changes",
           "changes_per_repair": "Changes per repair", "gini_sn": "Gini of short-notice changes"}
-ARM_NAMES = {"A": "A. ORTEC-like", "B": "B. Rule-ranked (main)", "C": "C. GenAI-chooser (qwen3:8b)",
+ARM_NAMES = {"A": "A. ORTEC-like", "B": "B. Rule-ranked (main)",
              "B_sn3": "B with SN weight 3", "B_sn6": "B with SN weight 6"}
 
 
@@ -40,40 +39,17 @@ def _rd():
     return _stats.RESULTS_DIR  # looked up at call time so tests can monkeypatch it
 
 
-def replay_chooser(seed: int, decisions: dict):
-    """Return the logged E5 choice for (seed, event_id); None means the engine uses the formula order,
-    exactly as E5 did for skipped (<2 options) events."""
-    def chooser(ctx, scored):
-        chosen = decisions.get((seed, ctx.event_id))
-        if chosen is None:
-            return None, {"skipped": True}
-        return chosen, {"agrees": None}
-    return chooser
-
-
-def load_e5_decisions(rd=None) -> dict:
-    path = (rd or _rd()) / "e5_decisions.jsonl"
-    out = {}
-    for line in path.read_text().splitlines():
-        if line.strip():
-            d = json.loads(line)
-            out[(d["seed"], d["event_id"])] = d["chosen"]
-    return out
-
-
 def run_arms(seeds=SEEDS) -> pd.DataFrame:
     policy = load_json("policy.json")
-    decisions = load_e5_decisions()
     rows = []
     for seed in seeds:
-        for arm, name, pol, chooser in [
-            ("A", "baseline", policy, None),
-            ("B", "strain", policy, None),
-            ("C", "ai", policy, replay_chooser(seed, decisions)),
-            ("B_sn3", "strain", {**policy, "weights": {**policy["weights"], "SN": 3.0}}, None),
-            ("B_sn6", "strain", {**policy, "weights": {**policy["weights"], "SN": 6.0}}, None),
+        for arm, name, pol in [
+            ("A", "baseline", policy),
+            ("B", "strain", policy),
+            ("B_sn3", "strain", {**policy, "weights": {**policy["weights"], "SN": 3.0}}),
+            ("B_sn6", "strain", {**policy, "weights": {**policy["weights"], "SN": 6.0}}),
         ]:
-            res = run_scenario(seed, name, pol, chooser=chooser)
+            res = run_scenario(seed, name, pol)
             row = run_metrics(res, policy["weights"])  # same weights for every arm's metrics
             row.update(seed=seed, arm=arm)
             rows.append(row)
@@ -179,8 +155,7 @@ def summary_markdown(runs: pd.DataFrame, expl: list[dict]) -> str:
                 cell += f" ({int((r[m] < a.loc[r.index, m]).sum())}/5)"
             cells.append(cell)
         lines.append(f"| {LABELS[m]} | " + " | ".join(cells) + " |")
-    lines += ["", "C replays the qwen3:8b choices logged in E5 (`e5_decisions.jsonl`); the replay reproduces "
-              "E5's rosters exactly.", ""]
+    lines += [""]
     if expl:
         lines += ["## Arm B explanations (GenAI explains the rule's choice)", "",
                   "| Model | Decisions | Valid output | Fact-check pass | Direction error | Wrong comparison | Mean latency (s) |",

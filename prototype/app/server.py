@@ -5,7 +5,6 @@ import csv
 import json
 import math
 import os
-import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +14,6 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from llm.decide import build_decision_payload, decide, decision_candidates
 from llm.monthly import compute_month_facts, write_report
 from llm.plain import plainify, replace_option_ids, shift_words
 from llm.policy_translate import translate_policy
@@ -33,72 +31,12 @@ from sim.ward import load_json
 APP_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = APP_DIR.parent / "results"
 AUDIT_PATH = Path(os.environ.get("ROSTER_AUDIT_PATH", APP_DIR / "data" / "audit.jsonl"))
-Mode = Literal["baseline", "strain", "ai"]
-APP_MODES = {"rule_explains": "strain", "genai_chooser": "ai"}  # policy.json "mode" -> default UI mode
+Mode = Literal["baseline", "strain"]
 Reason = Literal["local_knowledge", "preference", "skill_mix", "other"]
 
 
 PREVIEW_KEYS = ("QR_total", "nurses_qr_ge3_28d", "max_qr", "gini_strain", "unfilled", "SN_total",
                 "changes_per_repair")
-
-def load_e5_row(seed: int) -> dict | None:
-    """Mean PREVIEW_KEYS over the finite 'ai' rows of results/e5_runs.csv for this seed; None if unusable."""
-    try:
-        good = []
-        with (RESULTS_DIR / "e5_runs.csv").open(newline="") as fh:
-            for r in csv.DictReader(fh):
-                try:
-                    if r.get("policy") != "ai" or int(float(r["seed"])) != seed:
-                        continue
-                    vals = {k: float(r[k]) for k in PREVIEW_KEYS}  # None/missing/garbage -> skipped
-                except (KeyError, ValueError, TypeError):
-                    continue
-                if all(math.isfinite(v) for v in vals.values()):
-                    good.append(vals)
-        if not good:
-            return None
-        out = {k: sum(v[k] for v in good) / len(good) for k in PREVIEW_KEYS}
-        if not all(math.isfinite(v) for v in out.values()):
-            return None
-        return {k: round(v, 3) for k, v in out.items()}
-    except (OSError, ValueError, csv.Error):
-        return None
-
-
-def load_headline() -> dict | None:
-    """GenAI vs today's software, averaged over the measured wards (results/e5_*.csv); None if unusable."""
-    try:
-        rows = {}
-        with (RESULTS_DIR / "e5_summary.csv").open(newline="") as fh:
-            for r in csv.DictReader(fh):
-                rows[r.get("policy")] = r
-        base, ai = rows["baseline"], rows["ai"]
-        v = {p: {k: float(r[k]) for k in ("QR_total", "nurses_qr_ge3_28d", "unfilled")}
-             for p, r in (("baseline", base), ("ai", ai))}
-        if not all(math.isfinite(x) for d in v.values() for x in d.values()):
-            return None
-        if v["baseline"]["QR_total"] <= 0 or v["baseline"]["nurses_qr_ge3_28d"] <= 0:
-            return None
-        seeds = set()
-        with (RESULTS_DIR / "e5_runs.csv").open(newline="") as fh:
-            for r in csv.DictReader(fh):
-                try:
-                    if r.get("policy") == "ai":
-                        seeds.add(int(float(r["seed"])))
-                except (KeyError, ValueError, TypeError):
-                    continue
-        if not seeds:
-            return None
-        pct = lambda k: round(100 * (1 - v["ai"][k] / v["baseline"][k]))  # noqa: E731
-        beds = load_json("ward.json").get("beds")
-        beds = int(beds) if isinstance(beds, (int, float)) and not isinstance(beds, bool) and beds > 0 else None
-        return {"qr_pct": pct("QR_total"), "ge3_pct": pct("nurses_qr_ge3_28d"), "beds": beds,
-                "unfilled_same": abs(v["ai"]["unfilled"] - v["baseline"]["unfilled"]) < 0.1,
-                "unfilled_baseline": round(v["baseline"]["unfilled"], 1),
-                "unfilled_ai": round(v["ai"]["unfilled"], 1), "n_wards": len(seeds)}
-    except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError, csv.Error):
-        return None
-
 
 RESULT_METRICS = (("QR_total", "Quick returns per ward (8 weeks)", False),
                   ("nurses_qr_ge3_28d", "Nurses with 3+ quick returns in 4 weeks", False),
@@ -155,35 +93,29 @@ def _explanation_reliability(model: str | None) -> dict | None:
     return out
 
 def load_results() -> dict | None:
-    """E6 arms per ward: A (ORTEC-like), B (rule-ranked, main) and C (GenAI-chooser, experimental).
+    """E6 arms per ward: A (ORTEC-like) and B (rule-ranked).
 
     Reads results/e6_runs.csv; None if unusable. 'wins' counts wards where B beats A."""
     try:
         base = _per_seed(_read_rows("e6_runs.csv", "A", "arm"))
         ours = _per_seed(_read_rows("e6_runs.csv", "B", "arm"))
-        exp = _per_seed(_read_rows("e6_runs.csv", "C", "arm"))
         seeds = sorted(set(ours) & set(base))
         if not seeds:
             return None
         side = lambda xs: {"mean": sum(xs) / len(xs), "min": min(xs), "max": max(xs)}  # noqa: E731
-        exp_seeds = [sd for sd in seeds if sd in exp]
         metrics = []
         for key, label, cost in RESULT_METRICS:
             b, o = [base[sd][key] for sd in seeds], [ours[sd][key] for sd in seeds]
             sb, so = side(b), side(o)
-            e = [exp[sd][key] for sd in exp_seeds]
             metrics.append({"key": key, "label": label, "cost": cost, "baseline": sb, "ours": so,
-                            "exp": side(e) if e else None,
                             "change_pct": 100 * (so["mean"] - sb["mean"]) / sb["mean"] if sb["mean"] > 0 else None,
                             "wins": sum(1 for x, y in zip(o, b) if x < y),
-                            "ties": sum(1 for x, y in zip(o, b) if x == y),
-                            "exp_wins": sum(1 for sd in exp_seeds if exp[sd][key] < base[sd][key])})
+                            "ties": sum(1 for x, y in zip(o, b) if x == y)})
         wards = [{"ward": i + 1, "seed": sd,
-                  "values": {k: {"baseline": base[sd][k], "ours": ours[sd][k],
-                                 "exp": exp[sd][k] if sd in exp else None} for k, _, _ in RESULT_METRICS}}
+                  "values": {k: {"baseline": base[sd][k], "ours": ours[sd][k]} for k, _, _ in RESULT_METRICS}}
                  for i, sd in enumerate(seeds)]
         model = load_json("policy.json").get("model")
-        return {"available": True, "n_wards": len(seeds), "n_exp_wards": len(exp_seeds), "metrics": metrics,
+        return {"available": True, "n_wards": len(seeds), "metrics": metrics,
                 "wards": wards, "model": model, "explanations": _explanation_reliability(model)}
     except (OSError, ValueError, KeyError, TypeError, csv.Error):
         return None
@@ -200,9 +132,6 @@ class AppState:
         for name in ("baseline", "strain"):
             m = run_metrics(run_scenario(seed, name, self.policy), weights)
             out[name] = {k: (round(m[k], 3) if isinstance(m[k], float) else m[k]) for k in PREVIEW_KEYS}
-        ai = load_e5_row(seed)
-        if ai is not None:
-            out["ai"] = ai
         self.preview = out
 
     def mark_start(self) -> None:
@@ -218,7 +147,6 @@ class AppState:
         self.options = []
         self.scored = []
         self.explanation = None
-        self.decision = None
         self.policy_text = None
         self.last_day = 0
         self.shadow = Scenario(seed)
@@ -244,10 +172,10 @@ _auto_reset()
 
 
 def _guard_auto() -> None:
-    """Call with STATE_LOCK held: state-mutating endpoints are refused while GenAI autoplay runs."""
+    """Call with STATE_LOCK held: state-mutating endpoints are refused while autoplay runs."""
     if AUTO["running"]:
-        raise HTTPException(status_code=409, detail="GenAI autoplay running")
-app = FastAPI(title="Roster repair: ORTEC-like baseline vs GenAI")
+        raise HTTPException(status_code=409, detail="Autoplay running")
+app = FastAPI(title="Roster repair: rule ranks, GenAI explains, planner decides")
 
 
 class ScenarioIn(BaseModel):
@@ -366,8 +294,6 @@ def _state_json(event: dict | None = None) -> dict:
     sb_ortec = plan_scoreboard(STATE.shadow.roster, STATE.shadow.ward, policy["weights"])
     return {
         "seed": sc.seed,
-        "app_mode": policy.get("mode", "rule_explains"),
-        "default_mode": APP_MODES.get(policy.get("mode", "rule_explains"), "strain"),
         "days": ward.days,
         "nurses": [{"id": n.id, "fte": n.fte, "senior": n.senior, "night_ok": n.night_ok}
                    for n in ward.nurses],
@@ -380,7 +306,6 @@ def _state_json(event: dict | None = None) -> dict:
         "unfilled": sc.unfilled,
         "strain": [{"nurse": nid, "strain": round(s, 2), "QR": per[nid]["QR"]} for nid, s in strains.items()],
         "preview": STATE.preview,
-        "headline": load_headline(),
         "scoreboard": {"ours": sb_ours, "ortec": sb_ortec,
                        "history": STATE.history, "start": STATE.history_start},
         "since_takeover": _since_takeover(sb_ours, sb_ortec),
@@ -454,7 +379,7 @@ def _begin(ctx) -> bool:
                        "absent": ctx.absent, "mode": "-", "option_id": None, "unfilled": True})
         _record_resolved(ctx.event_id)
         return False
-    STATE.ctx, STATE.options, STATE.explanation, STATE.decision = ctx, options, None, None
+    STATE.ctx, STATE.options, STATE.explanation = ctx, options, None
     STATE.scored = score_options(ctx, options, STATE.policy)
     return True
 
@@ -474,7 +399,7 @@ def next_event() -> dict:
 
 def _clear_event() -> None:
     STATE.ctx, STATE.options, STATE.scored = None, [], []
-    STATE.explanation = STATE.decision = None
+    STATE.explanation = None
 
 def _auto_entry(ctx, top, policy_name: str) -> dict:
     return {"event_id": ctx.event_id, "day": ctx.day, "shift": ctx.shift, "absent": ctx.absent,
@@ -541,10 +466,7 @@ def fast_forward(body: FastForwardIn) -> dict:
 def get_options(mode: Mode = "baseline", limit: int = Query(10, ge=1, le=200)) -> dict:
     with STATE_LOCK:
         _require_event()
-        if mode == "ai":
-            ranked = decision_candidates(STATE.scored)
-        else:
-            ranked = rank_options(STATE.scored, mode)[:limit]
+        ranked = rank_options(STATE.scored, mode)[:limit]
         ours = rank_options(STATE.scored, "strain")[0]
         ortec = rank_options(STATE.scored, "baseline")[0]
         comparison = _comparison(ours, ortec)
@@ -568,27 +490,6 @@ def explain_current() -> dict:
     return {**result, "event_id": ctx.event_id}
 
 
-@app.post("/api/decide")
-def decide_current() -> dict:
-    with STATE_LOCK:
-        _guard_auto()
-        _require_event()
-        ctx = STATE.ctx
-        payload = build_decision_payload(ctx, STATE.scored, STATE.policy)
-        formula_top = rank_options(STATE.scored, "strain")[0].option.id
-        model = STATE.policy.get("model", "qwen3:4b")
-    result = decide(payload, formula_top, model, 45)
-    with STATE_LOCK:
-        if STATE.ctx is ctx:
-            STATE.decision = result
-        out = {**result, "event_id": ctx.event_id}
-        chosen = result["decision"]["chosen_option"] if result.get("decision") else None
-        so = next((x for x in STATE.scored if x.option.id == chosen), None)
-        if so is not None and STATE.ctx is ctx:
-            ortec = rank_options(STATE.scored, "baseline")[0]
-            out["comparison"] = _comparison(so, ortec, formula_top=formula_top)
-        return out
-
 @app.post("/api/apply")
 def apply_option(body: ApplyIn) -> dict:
     with STATE_LOCK:
@@ -603,34 +504,25 @@ def _apply_locked(body: ApplyIn) -> dict:
     match = next((so for so in STATE.scored if so.option.id == body.option_id), None)
     if match is None:
         raise HTTPException(status_code=409, detail="Option is not part of the current event")
-    dec = STATE.decision if body.mode == "ai" else None
-    ai_choice = dec["decision"]["chosen_option"] if dec and dec.get("decision") else None
     formula_top = rank_options(STATE.scored, "strain")[0].option.id
     if body.mode == "baseline":
         rank, top = match.rank_baseline, rank_options(STATE.scored, "baseline")[0].option.id
-    elif body.mode == "strain":
-        rank, top = match.rank_strain, formula_top
     else:
-        top = ai_choice or formula_top
-        rank = 1 if match.option.id == top else max(match.rank_strain, 2)
+        rank, top = match.rank_strain, formula_top
     if rank != 1 and body.override_reason is None:
         raise HTTPException(status_code=422, detail="override_reason is required for a non-top option")
     ctx = STATE.ctx
     STATE.scenario.apply(ctx, match.option)
     _record_resolved(ctx.event_id)
-    expl = STATE.explanation if body.mode == "strain" else dec
+    expl = STATE.explanation if body.mode == "strain" else None
     entry = {
         "event_id": ctx.event_id, "day": ctx.day, "shift": ctx.shift, "absent": ctx.absent,
         "mode": body.mode, "option_id": match.option.id, "rank": rank,
         "top_option": top,
         "override_reason": body.override_reason,
         "explanation_source": expl["source"] if expl else None,
-        "verified": expl["check"]["verified"] if expl and (body.mode != "ai" or ai_choice) else None,
+        "verified": expl["check"]["verified"] if expl else None,
     }
-    if body.mode == "ai":
-        entry.update({"ai_choice": ai_choice, "formula_top": formula_top,
-                      "ai_agrees": (ai_choice == formula_top) if ai_choice else None,
-                      "ai_verified": dec["check"]["verified"] if ai_choice else None})
     if body.mode == "strain":
         entry.update({
             "ranking": [so.option.id for so in rank_options(STATE.scored, "strain")[:5]],
@@ -655,7 +547,7 @@ def get_policy() -> dict:
 def translate(body: TranslateIn) -> dict:
     """Propose weights from words. Read-only: the policy is only changed by PUT /api/policy."""
     current = dict(STATE.policy["weights"])
-    result = translate_policy(body.text, current, STATE.policy.get("model", "qwen3:4b"), 45)
+    result = translate_policy(body.text, current, STATE.policy.get("model", "qwen3:8b"), 45)
     if result.get("proposal"):
         result["proposal"]["rationale_plain"] = plainify(result["proposal"].get("rationale"))
     return {**result, "current": current}
@@ -675,7 +567,6 @@ def put_policy(body: PolicyIn) -> dict:
         if STATE.ctx is not None:
             STATE.scored = score_options(STATE.ctx, STATE.options, STATE.policy)
             STATE.explanation = None
-            STATE.decision = None
         STATE.compute_preview()
         return STATE.policy
 
@@ -691,14 +582,6 @@ def _open_next_event() -> bool:
             return True
 
 
-def _first_sentence(text: str, limit: int = 220) -> str:
-    """First sentence of already-plain text (display only), capped at limit characters."""
-    text = " ".join((text or "").split())
-    m = re.search(r"[.!?](?=\s|$)", text)
-    out = text[:m.end()] if m else text
-    return out if len(out) <= limit else out[:limit].rsplit(" ", 1)[0] + "…"
-
-
 def _autoplay_status() -> dict:
     return {"running": AUTO["running"], "done": AUTO["done"], "total": AUTO["total"],
             "error": AUTO["error"], "log": list(STATE.autoplay_log[-30:])}
@@ -712,34 +595,12 @@ def _autoplay_step(mode: str) -> bool:
         ctx = STATE.ctx
         formula_so = rank_options(STATE.scored, "strain")[0]
         ortec_so = rank_options(STATE.scored, "baseline")[0]
-        payload = model = None
-        if mode == "ai":
-            payload = build_decision_payload(ctx, STATE.scored, STATE.policy)
-            model = STATE.policy.get("model", "qwen3:4b")
-    result = decide(payload, formula_so.option.id, model, 45) if mode == "ai" else None  # no lock during the LLM call
-    with STATE_LOCK:
-        if STATE.ctx is not ctx:
-            AUTO["error"] = "interrupted"
-            return False
-        dec = result["decision"] if result else None
-        ai_choice = dec["chosen_option"] if dec else None
-        ai_so = next((so for so in STATE.scored if so.option.id == ai_choice), None)
-        if ai_so is None:
-            ai_choice = None  # missing or unknown id: treat as no usable AI pick
-        fallback = mode == "ai" and ai_so is None
-        if mode == "ai" and not fallback:
-            chosen_so, by = ai_so, "GenAI"
-            text = _first_sentence(result["display_text"])
-        elif mode == "baseline":
+        if mode == "baseline":
             chosen_so, by, text = ortec_so, "ORTEC-like", "Picked by the ORTEC-like rule: fewest changes first."
-        elif fallback:
-            chosen_so, by = formula_so, "Formula (fallback)"
-            text = "GenAI was unavailable, so the load formula's top option was used."
         else:
             chosen_so, by, text = formula_so, "Formula", "Picked by the load formula: protect the most-loaded nurses."
         chosen = chosen_so.option.id
         option_texts = {so.option.id: plain_change(so.option) for so in STATE.scored}
-        verified = result["check"]["verified"] if mode == "ai" and not fallback else None
         STATE.last_day = ctx.day
         STATE.scenario.apply(ctx, chosen_so.option)
         top = ortec_so if mode == "baseline" else formula_so
@@ -748,12 +609,8 @@ def _autoplay_step(mode: str) -> bool:
             "mode": f"auto-{mode}", "option_id": chosen,
             "rank": 1 if chosen == top.option.id else max(chosen_so.rank_strain, 2),
             "top_option": top.option.id, "override_reason": None,
-            "explanation_source": result["source"] if result else None, "verified": verified,
+            "explanation_source": None, "verified": None,
         }
-        if mode == "ai":
-            entry.update({"ai_choice": ai_choice, "formula_top": formula_so.option.id,
-                          "ai_agrees": (ai_choice == formula_so.option.id) if not fallback else None,
-                          "ai_verified": verified, "fallback": fallback})
         _append_audit(entry)
         _record_resolved(ctx.event_id)
         STATE.autoplay_log.append({
@@ -762,7 +619,7 @@ def _autoplay_step(mode: str) -> bool:
             "chosen": chosen, "chosen_nurse": chosen_so.option.extra_nurse, "chosen_change_text": shift_words(describe(chosen_so.option)),
             "description": plain_change(chosen_so.option),
             "by": by, "formula_top": formula_so.option.id,
-            "agrees_with_formula": chosen == formula_so.option.id, "verified": verified,
+            "agrees_with_formula": chosen == formula_so.option.id, "verified": None,
             "display_text": replace_option_ids(text, option_texts),
             "plain_words": plain_words(chosen_so, ortec_so),
         })
@@ -794,7 +651,7 @@ def _autoplay_worker(total: int, mode: str) -> None:
 def start_autoplay(body: AutoplayIn) -> dict:
     with STATE_LOCK:
         if AUTO["running"]:
-            raise HTTPException(status_code=409, detail="GenAI autoplay running")
+            raise HTTPException(status_code=409, detail="Autoplay running")
         _auto_reset()
         STATE.autoplay_log = []
         AUTO.update({"running": True, "total": body.events})

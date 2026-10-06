@@ -15,10 +15,9 @@ const tradeoffWord = (t) => TRADEOFF_WORD[t] ?? String(t ?? "").replaceAll("_", 
 const SHIFT_WORD = { D: "day", E: "evening", N: "night" };
 const shiftWords = (s) => String(s ?? "").replace(/(^|: |→ |; )([DEN])\b/g, (_, p, c) => `${p}${SHIFT_WORD[c]} shift`);
 const TODAY = "Today's software (ORTEC-style)";
-const MODE_LABEL = { baseline: TODAY, ai: "GenAI chooses (experimental)", strain: "Rule ranks, GenAI explains", auto: "Auto (hospital rule)", "auto-ai": "GenAI-chooser autoplay (experimental)", "auto-strain": "Hospital rule autoplay", "auto-baseline": "Today's software autoplay", policy: "Policy" };
-// Column/label for "our" side: the rule-ranked choice by default; GenAI only in the experimental arm.
-const oursLabel = () => (mode === "ai" ? "GenAI chooses (experimental)" : "Rule-ranked choice");
-const oursShort = () => (mode === "ai" ? "GenAI" : "the hospital rule");
+const MODE_LABEL = { baseline: TODAY, strain: "Rule ranks, GenAI explains", auto: "Auto (hospital rule)", "auto-strain": "Hospital rule autoplay", "auto-baseline": "Today's software autoplay", policy: "Policy" };
+const oursLabel = () => "Rule-ranked choice";
+const oursShort = () => "the hospital rule";
 const LOWER = ' <span class="metric-hint">(lower is better)</span>';
 // Display backstop for the presenter view: no "Option_N" ids, no "Nurse_NN" ids anywhere.
 const noOptionIds = (s) => String(s ?? "").replace(/\bOption_0*(\d+)\b/gi, (_, n) => { const d = descOf(`Option_${Number(n)}`); return d ? `“${d}”` : "another option"; });
@@ -34,25 +33,20 @@ const shortNotice = (h) => h < 48;
 let autoRunning = false;
 let autoMode = "strain";
 let autoTimer = null;
-let defaultMode = "strain";  // from policy.json "mode" (rule_explains -> strain, genai_chooser -> ai)
 let mode = "strain";
 let explanation = null;
 let explainPending = false;
 let explainError = null;
 let state = null;
 let options = [];
-let decision = null;
-let decisionError = null;
 let chart = null;
 let scoreChart = null;
 let comparison = null;
 let weights = null;
 let policyForm = null;
 let proposal = null;
-let decisionPending = false;
 let reqToken = 0;
 let applying = false;
-const UNAVAILABLE = "GenAI is unavailable right now — a backup choice is shown.";
 const CHECK_NOTE = "Checks verify the numbers and wording against the roster data; the reasoning itself is reviewed by the planner.";
 const staleReq = (tok, eid, m) => tok !== reqToken || mode !== m || !state || !state.event || state.event.event_id !== eid;
 const isPresenter = () => document.body.classList.contains("presenter");
@@ -118,59 +112,25 @@ async function loadOptions() {
   options = r.options;
   comparison = r.comparison;
   if (mode === "strain") explain();
-  if (mode === "ai") decide();
 }
 
 function hideExplanation() {
   $("#explain-card").classList.add("hidden");
-  $("#decide-card").classList.add("hidden");
-  decision = null;
-  decisionError = null;
-  decisionPending = false;
   explanation = null;
   explainPending = false;
   explainError = null;
   reqToken++;
 }
 
-function aiPickId() { return decision && decision.decision ? decision.decision.chosen_option : null; }
 function formulaTopId() { const t = options.find((o) => o.rank === 1); return t ? t.id : null; }
 const optName = (id) => String(id ?? "");
 function descOf(id) {
   const o = options.find((x) => x.id === id);
   if (o && o.description) return o.description;
-  const c = decision && decision.comparison;
+  const c = comparison;
   if (c && c.ours.id === id) return c.ours.description;
   if (c && c.ortec.id === id) return c.ortec.description;
   return null;
-}
-
-async function decide() {
-  decisionPending = true;
-  $("#decide-card").classList.remove("hidden");
-  $("#decide-head").textContent = "GenAI is thinking…";
-  $("#decide-head").title = ""; $("#decide-text").title = "";
-  $("#decide-meta").textContent = "";
-  $("#decide-text").textContent = ""; clearShowFull("#decide-text");
-  $("#decide-issues").innerHTML = "";
-  $("#decide-formula").textContent = "";
-  const eid = state.event.event_id, tok = reqToken, m = mode;
-  try {
-    const r = await api("/api/decide", { method: "POST" });
-    if (staleReq(tok, eid, m)) return;
-    decision = r;
-    decisionPending = false;
-    renderDecision(r);
-    renderOptions();
-    renderCompare();
-  } catch (e) {
-    if (staleReq(tok, eid, m)) return;
-    decisionError = e.message;
-    decisionPending = false;
-    $("#decide-head").textContent = isPresenter() ? UNAVAILABLE : `GenAI decision unavailable: ${e.message}`;
-    $("#decide-head").title = e.message;
-    renderCompare();
-  }
 }
 
 // Show the short GenAI text; when it was cut, offer a link-style toggle for the full text.
@@ -198,39 +158,6 @@ function setAiText(id, r, fallback) {
     btn.textContent = open ? "Hide full reasoning" : "Show full reasoning";
   });
   el.insertAdjacentElement("afterend", btn);
-}
-
-function renderDecision(r) {
-  const c = r.check;
-  $("#decide-meta").textContent = "";
-  $("#decide-formula").textContent = "";
-  if (!r.decision) {
-    $("#decide-head").textContent = isPresenter() ? UNAVAILABLE : "GenAI decision unavailable — use the hospital rule's pick or decide manually.";
-    $("#decide-head").title = r.error || "";
-    clearShowFull("#decide-text");
-    $("#decide-text").textContent = isPresenter() ? "" : (r.error || "");
-    $("#decide-text").title = r.error || "";
-    $("#decide-issues").innerHTML = "";
-    $("#decide-meta").innerHTML = `<span class="src">${esc(r.source)} · ${r.latency_ms} ms</span>`;
-    return;
-  }
-  const d = r.decision;
-  const badge = factsBadge(c.verified, isPresenter());
-  const desc = descOf(d.chosen_option);
-  $("#decide-head").innerHTML = isPresenter() ? `GenAI's choice: ${esc(niceNurse(desc ?? "see the comparison"))} ${badge}`
-    : `GenAI chose ${esc(optName(d.chosen_option))}${desc ? ` (${esc(desc)})` : ""} ${badge}`;
-  setAiText("#decide-text", r, d.reasoning);
-  const issues = [];
-  if (c.claims_false) issues.push(`${c.claims_false} of ${c.claims_total} numbers quoted by GenAI do not match the data`);
-  if (c.unsupported_numbers.length) issues.push(`GenAI used numbers that are not in the data: ${c.unsupported_numbers.join(", ")}`);
-  if (c.no_claims) issues.push("GenAI did not back its text with any numbers");
-  if (c.direction_errors && c.direction_errors.length) issues.push(`GenAI wording says the opposite of the numbers (up vs down): ${c.direction_errors.join(", ")}`);
-  $("#decide-issues").innerHTML = (isPresenter() ? "" : `<li>Main trade-off: ${esc(tradeoffWord(d.main_tradeoff))}</li>`) +
-    issues.map((i) => `<li class="warn">${esc(i)}</li>`).join("") +
-    (isPresenter() ? `<li class="muted">${esc(CHECK_NOTE)}</li>` : "");
-  $("#decide-formula").innerHTML = `${RULE} top: ${esc(optName(r.formula_top))} — ` +
-    (r.agrees ? "agrees ✅" : "differs ⚠️");
-  $("#decide-meta").innerHTML = `<span class="src">${esc(r.source)} · ${r.latency_ms} ms</span>`;
 }
 
 // GenAI explains the rule's choice. The choice is already made: accept is enabled before this returns,
@@ -300,7 +227,7 @@ function askReason(pickFrom = null) {
 async function applyOption(opt, givenReason = null) {
   if (applying) return;
   let reason = givenReason;
-  const needsReason = mode === "ai" && aiPickId() ? opt.id !== aiPickId() : opt.rank !== 1;
+  const needsReason = opt.rank !== 1;
   if (needsReason && !reason) {
     const a = await askReason();
     if (!a) return;
@@ -330,7 +257,7 @@ function setApplyDisabled(d) {
 
 // Override from the presenter view: pick another ranked option and give a short reason.
 async function overrideMain() {
-  const top = mode === "ai" && aiPickId() ? aiPickId() : formulaTopId();
+  const top = formulaTopId();
   const others = options.filter((o) => o.id !== top);
   if (!others.length) { toast("There is no other option for this sick call."); return; }
   const a = await askReason(others);
@@ -340,9 +267,9 @@ async function overrideMain() {
 }
 
 async function applyMain() {
-  const id = (mode === "ai" ? aiPickId() : null) || formulaTopId();
+  const id = formulaTopId();
   const opt = options.find((o) => o.id === id);
-  if (!opt) { toast("GenAI's pick is not among the current options — refresh with Next sick call."); return; }
+  if (!opt) { toast("The rule's choice is not among the current options — refresh with Next sick call."); return; }
   await applyOption(opt);
 }
 
@@ -350,19 +277,11 @@ function renderApplyMain() {
   const btn = $("#btn-apply-main"), st = $("#apply-status");
   if (!btn) return;
   $("#btn-override-main").disabled = applying || autoRunning || options.length < 2 || mode === "baseline";
-  if (mode !== "ai") {  // rule-ranked: accept is available at once; GenAI's explanation never gates it
-    btn.textContent = "✓ Accept the rule's choice";
-    btn.disabled = applying || autoRunning || !options.length || mode === "baseline";
-    if (explainPending) st.innerHTML = '<span class="spinner"></span>GenAI is writing an explanation…';
-    else st.textContent = "";
-    return;
-  }
-  const unavailable = !!decisionError || (decision && !decision.decision);
-  const ready = !!aiPickId();
-  btn.textContent = unavailable ? (isPresenter() ? "Apply backup choice" : "Apply hospital rule's choice") : "Apply GenAI's choice (experimental)";
-  btn.disabled = applying || autoRunning || !options.length || mode !== "ai" || !(ready || unavailable);
-  if (decisionPending && !decision && !decisionError) st.innerHTML = '<span class="spinner"></span>GenAI is thinking…';
-  else st.textContent = unavailable ? (isPresenter() ? UNAVAILABLE : "GenAI could not decide this one — the hospital rule check's pick is used.") : "";
+  // Accept is available at once; GenAI's explanation never gates it.
+  btn.textContent = "✓ Accept the rule's choice";
+  btn.disabled = applying || autoRunning || !options.length || mode === "baseline";
+  if (explainPending) st.innerHTML = '<span class="spinner"></span>GenAI is writing an explanation…';
+  else st.textContent = "";
 }
 
 async function setMode(m) {
@@ -385,9 +304,8 @@ async function setView(v) {
   document.body.classList.toggle("expert", v === "expert");
   $("#btn-view").textContent = v === "presenter" ? "Show details" : "Presenter view";
   try { localStorage.setItem("roster-view", v); } catch (e) { /* storage unavailable */ }
-  if (v === "presenter" && mode === "baseline") await setMode(defaultMode);
+  if (v === "presenter" && mode === "baseline") await setMode("strain");
   else if (state) render();
-  if (decision && !decisionPending && !$("#decide-card").classList.contains("hidden")) renderDecision(decision);
 }
 
 async function startPresenter() {
@@ -457,7 +375,7 @@ function bestClasses(vals) {
 function renderPreview() {
   const el = $("#preview");
   if (!state || !state.preview || isPresenter()) { el.innerHTML = ""; return; }
-  const b = state.preview.baseline, s = state.preview.strain, a = state.preview.ai || null;
+  const b = state.preview.baseline, s = state.preview.strain;
   const fix = (m) => (m ? Number(m.changes_per_repair.toFixed(2)) : null);
   const pv = isPresenter();
   const rows = [
@@ -469,30 +387,21 @@ function renderPreview() {
     ["Changes per repair", "changes_per_repair"],
   ].filter((r) => !pv || r[2]);
   const val = (m, k) => (m ? (k === "changes_per_repair" ? fix(m) : m[k]) : null);
-  const cols = [0, 1, 2].filter((i) => (i !== 1 || a) && !(pv && i === 2));
-  const headCells = [`<th>${TODAY}</th>`, "<th>GenAI chooses (experimental, measured)</th>", `<th>${RULE}</th>`];
-  const thead = "<tr><th></th>" + cols.map((i) => headCells[i]).join("") + "</tr>";
+  const thead = `<tr><th></th><th>${TODAY}</th><th>${RULE}</th></tr>`;
   const body = rows.map(([l, k]) => {
-    const vals = [val(b, k), val(a, k), val(s, k)];
-    const cls = bestClasses(pv ? [vals[0], vals[1]].concat([null]) : vals);
-    const cells = cols.map((i) => `<td class="${cls[i]}">${vals[i]}</td>`).join("");
-    return `<tr><td>${l}${LOWER}</td>${cells}</tr>`;
+    const vals = [val(b, k), val(s, k)];
+    const cls = bestClasses(vals);
+    return `<tr><td>${l}${LOWER}</td>${vals.map((v, i) => `<td class="${cls[i]}">${v}</td>`).join("")}</tr>`;
   }).join("");
-  const unf = (a ? [b.unfilled, a.unfilled] : [b.unfilled]).concat(pv ? [] : [s.unfilled]);
-  const note = unf.every((u) => u === unf[0]) ? "Same coverage — the difference is who carries the load."
-    : `Coverage (unfilled shifts): today's software ${b.unfilled}${a ? ` · GenAI chooses ${a.unfilled}` : ""}${pv ? "" : ` · hospital rule check ${s.unfilled}`}`;
-  const missing = a ? "" : '<p class="muted-note">GenAI-chooser column: not measured for this seed (measured for seeds 0–4).</p>';
-  el.innerHTML = `<table class="cmp">${thead}${body}</table><p class="banner-note">${note}</p>${missing}`;
+  const note = b.unfilled === s.unfilled ? "Same coverage — the difference is who carries the load."
+    : `Coverage (unfilled shifts): today's software ${b.unfilled} · hospital rule ${s.unfilled}`;
+  el.innerHTML = `<table class="cmp">${thead}${body}</table><p class="banner-note">${note}</p>`;
 }
 
 function compareRows(r, o, thead) {
   const qr = (v) => (v < 0 ? `removes ${-v}` : String(v));
   const mv = (m) => (m ? `${esc(m.nurse)}: tiredness score ${m.before} → ${m.after}` : "nobody");
   const row = (label, fr, fo) => `<tr><td>${label}</td><td>${fr}</td><td>${fo}</td></tr>`;
-  if (!o) {
-    return `<table class="cmp">${thead}` + row("Option", esc(optName(r.id)), '<span class="muted">GenAI is thinking…</span>') +
-      row("Change", esc(shiftWords(r.change_text)), "") + "</table>";
-  }
   return `<table class="cmp">${thead}` +
     row("Option", esc(optName(r.id)), esc(optName(o.id))) +
     row("Change", esc(shiftWords(r.change_text)), esc(shiftWords(o.change_text))) +
@@ -537,29 +446,6 @@ function renderRuleCards() {
   $("#genai-explains").innerHTML = explainBubble();
 }
 
-function renderCards(c, backup = false) {
-  const lines = (c && c.card_lines) || comparison.card_lines;
-  const rest = (lines && lines.rest_lines) || (comparison && comparison.rest_lines) || {};
-  const ORTEC_T = "🖥️ Today's software", GENAI_T = "✨ GenAI chooses (experimental)";
-  const ORTEC_HOW = "Looks for: free contract hours and the fewest shift changes. Does not look at how tired anyone is.";
-  const GENAI_HOW = "Looks at: every nurse's rest, nights, overtime and last-minute calls over 8 weeks, then picks the fairest fix.";
-  const ortec = cardHtml(ORTEC_T, lines ? lines.ortec : [comparison.ortec.description], rest.ortec, "ortec", "Simplest fix", ORTEC_HOW);
-  const genai = backup ? cardHtml("🛟 Backup choice", lines.ours, rest.ours, "genai backup", "GenAI unavailable",
-      "GenAI did not answer in time, so the hospital's fairness rule picked this fix.")
-    : c && c.card_lines ? cardHtml(GENAI_T, c.card_lines.ours, (c.card_lines.rest_lines || {}).ours, "genai", "GenAI's pick", GENAI_HOW)
-    : `<div class="choice genai"><h3>${GENAI_T}</h3><p class="how">${esc(GENAI_HOW)}</p><p class="muted thinking"><span class="spinner"></span>GenAI is reading the roster and thinking…</p></div>`;
-  const diffText = c ? niceNurse(c.difference || c.who_words || "") : "";
-  const diff = diffText ? `<div class="diff"><span class="diff-lbl">👉 The difference</span>${esc(diffText)}</div>` : "";
-  $("#compare").innerHTML = `<div class="choice-cards vs-cards">${ortec}<div class="vs">vs</div>${genai}</div>${diff}`;
-  const ex = $("#genai-explains");
-  if (decision && decision.decision) {
-    // The option text is already on the GenAI card; start the explanation with "This choice" instead of repeating it.
-    const short = niceNurse(decision.display_text ?? decision.decision.reasoning).replace(/^“[^”]+”/, "This choice");
-    const badge = decision.check ? factsBadge(decision.check.verified, true) : "";
-    ex.innerHTML = `<div class="bubble"><div class="lbl">✨ GenAI explains its choice</div><p>${esc(short)}</p>${badge}</div>`;
-  } else ex.innerHTML = "";
-}
-
 function renderCompare() {
   const card = $("#compare-card");
   renderApplyMain();
@@ -567,30 +453,6 @@ function renderCompare() {
   if (!comparison || !options.length) { card.classList.add("hidden"); return; }
   card.classList.remove("hidden");
   const words = (c) => (isPresenter() ? niceNurse(c.who_words ?? c.plain_words) : c.plain_words);
-  if (mode === "ai") {
-    if (isPresenter()) $("#compare-title").innerHTML = '<span class="step"><span class="num">2</span>Two ways to fill the gap</span>';
-    else $("#compare-title").textContent = "This decision: Today's software vs GenAI chooses (experimental)";
-    const thead = isPresenter() ? "<tr><th></th><th>Today's software</th><th>GenAI chooses</th></tr>"
-      : "<tr><th></th><th>Today's software would…</th><th>GenAI chooses (experimental)</th></tr>";
-    const c = decision && decision.comparison ? decision.comparison : null;
-    const failed = decisionError || (decision && !decision.decision);
-    if (failed && isPresenter() && comparison.card_lines) { renderCards(null, true); return; }
-    if (failed || (decision && !c)) {
-      const why = decisionError || (decision && decision.error) || "";
-      $("#compare").innerHTML = decision && decision.decision
-        ? "<p class=\"muted\">GenAI chose an option, but the comparison is missing.</p>"
-        : `<p class="muted"></p>`;
-      if (!(decision && decision.decision)) $("#compare p").textContent = isPresenter() ? UNAVAILABLE : "GenAI decision unavailable" + (why ? `: ${why}` : "") + " — use the hospital rule's pick or decide manually.";
-      $("#plain-text").textContent = "";
-      $("#genai-explains").innerHTML = "";
-      return;
-    }
-    if (isPresenter()) { renderCards(c); return; }
-    $("#compare").innerHTML = compareRows(comparison.ortec, c ? c.ours : null, thead);
-    if (c) $("#rule-line").textContent = `${RULE}: ` + (c.formula_top === c.ours.id ? "agrees ✅" : `prefers ${optName(c.formula_top)} ⚠️`);
-    $("#plain-text").textContent = c ? words(c) : "";
-    return;
-  }
   if (mode === "strain" && isPresenter()) {
     $("#compare-title").innerHTML = '<span class="step"><span class="num">2</span>Two ways to fill the gap — the rule ranks, you decide</span>';
     renderRuleCards();
@@ -663,10 +525,6 @@ function renderScoreboard() {
 
 function applyBtn(o) {
   const dis = autoRunning ? " disabled" : "";
-  if (mode === "ai") {
-    const pick = aiPickId() ? o.id === aiPickId() : o.rank === 1;
-    return `<button${dis} data-opt="${esc(o.id)}" class="${pick ? "primary" : ""}">${pick ? (aiPickId() ? "Apply (GenAI pick)" : "Apply (top)") : "Apply"}</button>`;
-  }
   return `<button${dis} data-opt="${esc(o.id)}" class="${o.rank === 1 ? "primary" : ""}">${o.rank === 1 ? "Apply (top)" : "Apply"}</button>`;
 }
 
@@ -699,11 +557,8 @@ function renderOptions() {
   const head = mode === "baseline"
     ? `<tr><th>Option</th><th title="${ORTEC_TIP}">Today's software rank</th><th>Change</th><th>What happens</th><th>Nurse</th><th>Contract hours per week</th><th>Hours this period</th><th>Changes</th><th></th></tr>`
     : `<tr><th>Option</th><th title="${RANK_TIP}">Rule rank</th><th title="${ORTEC_TIP}">Today's software rank</th><th>Change</th><th>What happens</th>` + METRICS.map((m) => `<th title="${esc(METRIC_TIP[m])}">${esc(METRIC_LABEL[m])}</th>`).join("") + `<th title="How much this option changes the combined tiredness score of the nurses involved">Change in tiredness</th><th></th></tr>`;
-  const pickId = mode === "ai" ? aiPickId() : null;
-  const topId = mode === "ai" ? formulaTopId() : null;
-  const tags = (o) => (o.id === pickId ? '<span class="tag">GenAI pick</span>' : "") +
-    (o.id === topId ? `<span class="tag formula">${RULE}</span>` : "");
-  const rowCls = (o) => (mode === "ai" ? (o.id === pickId ? "ai-pick" : "") : (o.rank === 1 ? "top" : ""));
+  const tags = () => "";
+  const rowCls = (o) => (o.rank === 1 ? "top" : "");
   const rows = options.map((o) => (mode === "baseline"
     ? `<tr class="${rowCls(o)}"><td>${esc(o.id)}${tags(o)}</td><td>${o.rank}</td><td>${esc(shiftWords(o.change_text))}</td><td>${esc(o.description)}</td><td>${esc(o.nurse)}</td>` +
       `<td>${o.contract_h.toFixed(1)}</td><td>${o.hours_period.toFixed(1)}</td><td>${o.n_changes}</td><td>${applyBtn(o)}</td></tr>`
@@ -892,10 +747,9 @@ function renderResults(r) {
     return `<span class="${v < 0 ? "good" : v > 0 ? "badc" : "flat"}">${v > 0 ? "+" : v < 0 ? MINUS : ""}${Math.abs(v)}%</span>`; };
   const rows = r.metrics.map((m) => `<tr class="${m.cost ? "cost" : ""}"><td>${esc(m.label)}${m.cost ? ' <span class="tag-cost">(the cost)</span>' : ""}</td>` +
     `<td class="num">${cell(m.baseline, m.key)}</td><td class="num">${cell(m.ours, m.key)}</td><td class="num">${chg(m)}</td>` +
-    `<td class="num">${m.wins} of ${n}${m.ties ? ` <span class="tag-cost">(${m.ties} tied)</span>` : ""}</td>` +
-    `<td class="num exp">${cell(m.exp, m.key)}</td></tr>`).join("");
+    `<td class="num">${m.wins} of ${n}${m.ties ? ` <span class="tag-cost">(${m.ties} tied)</span>` : ""}</td></tr>`).join("");
   $("#res-table").innerHTML = `<table class="res"><tr><th>Metric</th><th class="num">Today's software</th><th class="num">Rule ranks, GenAI explains</th>` +
-    `<th class="num">Change</th><th class="num">Wards where the rule is better</th><th class="num exp">GenAI chooses (experimental)</th></tr>${rows}</table>`;
+    `<th class="num">Change</th><th class="num">Wards where the rule is better</th></tr>${rows}</table>`;
   renderResultsChart(r);
   const e = r.explanations, parts = [];
   if (e) {
@@ -907,8 +761,8 @@ function renderResults(r) {
   $("#res-rel").innerHTML = parts.length ? `<div class="rel-title">How reliable are GenAI's explanations? (${esc(e.model ?? "")}, ${e.n_decisions ?? "?"} decisions)</div>${parts.join('<span class="sep">·</span>')}` +
     '<p class="muted">GenAI never changes the ranking or the choice — if it fails, the rule\'s choice stands.</p>' : "";
   $("#res-rel").classList.toggle("hidden", !parts.length);
-  $("#res-foot").textContent = "Simulated wards built from Erasmus MC and Dutch parameters. The experimental column replays the GenAI-chooser run" +
-    (r.model ? ` (${r.model}).` : ".");
+  $("#res-foot").textContent = "Simulated wards built from Erasmus MC and Dutch parameters." +
+    (r.model ? ` GenAI explanations by ${r.model}, running locally.` : "");
 }
 
 function renderResultsChart(r) {
@@ -982,7 +836,7 @@ async function writeMonthly() {
 
 // ---- GenAI autoplay --------------------------------------------------------------------------
 const BUSY_SELECTORS = "#btn-start, #btn-view, #btn-new, #btn-next, #btn-ff, #btn-auto, #btn-autoplay, #auto-n, #policy-form button, #btn-apply-proposal, #btn-translate, #btn-override-main, .mode";
-const WHO = { ai: "GenAI (experimental)", strain: "the hospital rule", baseline: "today's software" };
+const WHO = { strain: "the hospital rule", baseline: "today's software" };
 
 function setBusy(running) {
   autoRunning = running;
@@ -1109,9 +963,8 @@ document.addEventListener("DOMContentLoaded", () => {
     state = await api("/api/state");
     await loadPolicy();
     if (state.autoplay_running) autoRunning = true;
-    defaultMode = state.default_mode || "strain";
     await setView(storedView());
-    await setMode(defaultMode);
+    await setMode("strain");
     render();
     await loadAudit();
     if (state.autoplay_running) watchAutoplay();

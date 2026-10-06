@@ -116,21 +116,6 @@ def fig_e4(summary):
     _save(fig, "e4_agents.png")
 
 
-def fig_e5(summary):
-    panels = [("QR_total", "Total quick returns"), ("gini_strain", "Gini of per-nurse strain"),
-              ("nurses_qr_ge3_28d", "Nurses with ≥3 QR in 28 days"), ("changes_per_repair", "Changes per repair")]
-    colors = {**COLORS, "ai": "#d97706"}
-    labels = {**LABELS, "ai": "AI decides"}
-    pols = [p for p in ("baseline", "strain", "ai") if p in set(summary.policy)]
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4.5))
-    for ax, (m, t) in zip(axes, panels):
-        vals = [summary.loc[summary.policy == p, m].iloc[0] for p in pols]
-        ax.bar(range(len(pols)), vals, color=[colors[p] for p in pols])
-        ax.set_xticks(range(len(pols)), [labels[p] for p in pols])
-        ax.set_title(t, fontsize=12)
-    fig.suptitle("E5 — AI as decision-maker (lower is better)")
-    _save(fig, "e5_ai_decides.png")
-
 def main() -> None:
     def read(name):
         path = RESULTS_DIR / name
@@ -148,8 +133,6 @@ def main() -> None:
         fig_e3(pd.concat([pd.read_csv(f) for f in e3_files], ignore_index=True))
     if (e4 := read("e4_summary.csv")) is not None:
         fig_e4(e4)
-    if (e5 := read("e5_summary.csv")) is not None:
-        fig_e5(e5)
 
 
 if __name__ == "__main__":

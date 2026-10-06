@@ -27,7 +27,6 @@
   <div class="toggle x-expert">
     <button class="mode" data-mode="baseline">Baseline: Today's software (ORTEC-style)</button>
     <button class="mode active" data-mode="strain">Rule ranks, GenAI explains, you decide</button>
-    <button class="mode experimental" data-mode="ai" title="Experimental arm C: GenAI picks the option">Experimental: GenAI chooses</button>
   </div>
   <span id="remaining" class="muted x-expert"></span>
   <span class="ff x-expert">
@@ -52,13 +51,6 @@
     <section id="sick-card" class="card"><h2><span class="step x-presenter"><span class="num">1</span>A nurse calls in sick</span><span class="x-expert">Sick call</span></h2>
       <div id="event" class="big-line"></div>
       <button id="btn-next" class="primary hidden">Next sick call ▶</button>
-      <div id="decide-card" class="hidden">
-        <h3 class="x-expert">GenAI decision (experimental) <span id="decide-meta"></span></h3>
-        <div id="decide-head"></div>
-        <p id="decide-text"></p>
-        <details class="why x-expert"><summary>why?</summary><ul id="decide-issues"></ul></details>
-        <div id="decide-formula" class="x-expert"></div>
-      </div>
     </section>
     <section id="explain-card" class="card hidden x-expert">
       <h2>GenAI explains the rule's choice <span id="explain-meta"></span></h2>

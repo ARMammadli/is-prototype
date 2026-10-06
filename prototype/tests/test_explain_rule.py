@@ -1,14 +1,10 @@
 """Rule ranks, GenAI explains: payload, fact check, and the hard rule that GenAI never changes the choice."""
-import pandas as pd
 import pytest
 
-from evaluation import e6_arms
-from evaluation.stats import RESULTS_DIR
 from llm import service
 from llm.checker import check_explanation, nurse_direction_errors
 from llm.prompt import DEFAULT_POLICY_TEXT, EXPLAIN_SCHEMA, build_explain_payload
 from sim.engine import run_scenario
-from sim.metrics import run_metrics
 from sim.policies import rank_options
 from sim.ward import load_json
 
@@ -93,13 +89,3 @@ def test_hard_rule_genai_never_changes_the_choice(monkeypatch, reply):
     explained = run_scenario(2, "strain", policy, on_event=explainer)
     assert calls and explained.final.by_nurse == plain.final.by_nurse
     assert [r.chosen for r in explained.records] == [r.chosen for r in plain.records]
-
-
-@pytest.mark.skipif(not (RESULTS_DIR / "e5_decisions.jsonl").exists(), reason="needs E5 results")
-def test_replayed_genai_chooser_reproduces_e5():
-    decisions = e6_arms.load_e5_decisions()
-    e5 = pd.read_csv(RESULTS_DIR / "e5_runs.csv").set_index("seed")
-    policy = load_json("policy.json")
-    row = run_metrics(run_scenario(0, "ai", policy, chooser=e6_arms.replay_chooser(0, decisions)), policy["weights"])
-    for k in ("QR_total", "nurses_qr_ge3_28d", "SN_total", "max_qr", "unfilled"):
-        assert row[k] == e5.loc[0, k]
