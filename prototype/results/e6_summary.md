@@ -16,6 +16,8 @@ C replays the qwen3:8b choices logged in E5 (`e5_decisions.jsonl`); the replay r
 
 ## Arm B explanations (GenAI explains the rule's choice)
 
-| Model | Decisions | Valid output | Fact-check pass | Direction error | Mean latency (s) |
-|---|---|---|---|---|---|
-| qwen3:8b | 400 | 100.0% | 96.5% | 0.5% | 9.7 |
+| Model | Decisions | Valid output | Fact-check pass | Direction error | Wrong comparison | Mean latency (s) |
+|---|---|---|---|---|---|---|
+| qwen3:8b | 400 | 100.0% | 66.2% | 0.5% | 30.8% | 9.7 |
+
+Fact-check pass = numbers, claims, up/down wording and claims about today's software / the cost all match the data (first pass without the comparison check: 96.5%). A manual read of 25 explanations found 9 with a factual error the first-pass check missed (all where the rule and today's software disagree); the comparison check now catches 7 of them.

@@ -41,6 +41,8 @@ Rules:
   the same. Use exactly that direction: 'fewer'/'lower' only for lower, 'more'/'higher' only for higher.
   When you compare two numbers, write the rule's number first: "56 vs. 96".
 - When you name nurses with a number, use each nurse's own number from the JSON.
+- The roster numbers are from a simulated month (see source_note); say so once, and never suggest that
+  planner overrides changed them.
 - Describe what the planner did only from 'planner'. If it has a note, repeat that nothing was logged;
   never claim the planner accepted or overrode anything that is not counted there.
 - Write '%' only after a number taken from pct_change or pass_rate_pct; other numbers are counts.
@@ -125,6 +127,9 @@ def compute_month_facts(seed: int, month: int, policy: dict, audit_entries: list
     keys = [k for k in r if not k.startswith("_")]
     facts = {
         "ward": seed + 1, "month": month, "days": f"{lo + 1}-{hi + 1}",
+        "source_note": ("Roster numbers come from a simulation of the month in which the rule's top choice was "
+                        "applied to every sick call; planner overrides in the live log are counted separately "
+                        "and are not reflected in these roster numbers."),
         "sick_calls": sum(1 for x in rule.records if lo <= x.day <= hi),
         "hospital_rule": {k: r[k] for k in keys},
         "todays_software": {k: o[k] for k in keys},

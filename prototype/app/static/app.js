@@ -942,6 +942,7 @@ function renderMonthlyFacts(f) {
   const planner = p ? `${p.decisions_by_planner} decisions in the live demo: ${p.accepted_rule_choice} accepted, ${p.overridden} overridden` +
     (Object.keys(p.override_reasons).length ? ` (${Object.entries(p.override_reasons).map(([k, v]) => `${esc(k)}: ${v}`).join(", ")})` : "") : "—";
   return `<p>Ward ${f.ward} · days ${esc(f.days)} · ${f.sick_calls} sick calls · same sick calls for both</p>` +
+    `<p class="muted">Simulated month: the rule's choice applied to every sick call. Planner overrides from the live log are counted below but not reflected in these roster numbers.</p>` +
     `<table class="cmp"><tr><th></th><th>Today's software</th><th>Hospital rule</th></tr>${rows}</table>` +
     `<ul><li>Quick returns already in the original roster: <b>${f.quick_returns_in_original_roster}</b></li>` +
     `<li>Most last-minute call-ins: ${nurses(f.most_last_minute_call_ins, "last_minute_call_ins")}</li>` +

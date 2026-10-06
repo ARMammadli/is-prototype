@@ -121,12 +121,34 @@ def run_explanations(model: str, timeout: float, seeds=SEEDS) -> None:
                 print(f"seed {seed} {i + 1}/{len(items)} {c['status']} {r['latency_ms']}ms", flush=True)
 
 
+def rescore(model: str) -> None:
+    """Re-run the (newer) comparison check on saved explanation texts; no LLM calls.
+
+    Keeps the first-pass result as verified_v1 and adds n_comparison_errors."""
+    from llm.checker import comparison_errors
+    policy = load_json("policy.json")
+    path = _rd() / f"e6_explanations_{model.replace(':', '-')}.jsonl"
+    rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    pay = {(sd, eid): p for sd in SEEDS for eid, p in collect_b_payloads(sd, policy)}
+    for r in rows:
+        r.setdefault("verified_v1", r["verified"])
+        errs = comparison_errors(r["text"], pay[(r["seed"], r["event_id"])]) if r["valid"] else []
+        r["comparison_errors"], r["n_comparison_errors"] = errs, len(errs)
+        r["verified"] = bool(r["verified_v1"] and not errs)
+        r["status"] = "verified" if r["verified"] else ("mismatch" if r["valid"] else "unavailable")
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
 def explanation_summary(rows: pd.DataFrame) -> dict:
     valid = rows[rows.valid]
     return {"model": rows.model.iloc[0], "n_decisions": len(rows),
             "valid_output_rate": float(rows.valid.mean()),
             "fact_check_pass_rate": float(valid.verified.mean()) if len(valid) else float("nan"),
             "direction_error_rate": float((valid.n_direction_errors > 0).mean()) if len(valid) else float("nan"),
+            "comparison_error_rate": (float((valid.n_comparison_errors > 0).mean())
+                                      if len(valid) and "n_comparison_errors" in valid else float("nan")),
+            "fact_check_pass_rate_v1": (float(valid.verified_v1.mean())
+                                        if len(valid) and "verified_v1" in valid else float("nan")),
             "unsupported_number_rate": float((valid.n_unsupported > 0).mean()) if len(valid) else float("nan"),
             "false_claim_rate": float((valid.claims_false > 0).mean()) if len(valid) else float("nan"),
             "mean_latency_s": float(valid.latency_ms.mean() / 1000) if len(valid) else float("nan")}
@@ -161,13 +183,17 @@ def summary_markdown(runs: pd.DataFrame, expl: list[dict]) -> str:
               "E5's rosters exactly.", ""]
     if expl:
         lines += ["## Arm B explanations (GenAI explains the rule's choice)", "",
-                  "| Model | Decisions | Valid output | Fact-check pass | Direction error | Mean latency (s) |",
-                  "|---|---|---|---|---|---|"]
+                  "| Model | Decisions | Valid output | Fact-check pass | Direction error | Wrong comparison | Mean latency (s) |",
+                  "|---|---|---|---|---|---|---|"]
         for e in expl:
             lines.append(f"| {e['model']} | {e['n_decisions']} | {e['valid_output_rate']:.1%} | "
                          f"{e['fact_check_pass_rate']:.1%} | {e['direction_error_rate']:.1%} | "
-                         f"{e['mean_latency_s']:.1f} |")
-        lines.append("")
+                         f"{e['comparison_error_rate']:.1%} | {e['mean_latency_s']:.1f} |")
+        lines += ["", "Fact-check pass = numbers, claims, up/down wording and claims about today's software / the cost "
+                  "all match the data (first pass without the comparison check: "
+                  + ", ".join(f"{e['fact_check_pass_rate_v1']:.1%}" for e in expl) + "). "
+                  "A manual read of 25 explanations found 9 with a factual error the first-pass check missed "
+                  "(all where the rule and today's software disagree); the comparison check now catches 7 of them.", ""]
     return "\n".join(lines)
 
 
@@ -205,7 +231,7 @@ def write_summary() -> str:
 def main() -> None:
     policy = load_json("policy.json")
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["arms", "explain", "summary"])
+    ap.add_argument("cmd", choices=["arms", "explain", "rescore", "summary"])
     ap.add_argument("--model", default=policy["model"])
     ap.add_argument("--timeout", type=float, default=policy["eval_timeout_s"])
     args = ap.parse_args()
@@ -220,6 +246,9 @@ def main() -> None:
             print(f"Ollama is not reachable at {OLLAMA_URL}.")
             sys.exit(2)
         run_explanations(args.model, args.timeout)
+    elif args.cmd == "rescore":
+        rescore(args.model)
+        print(write_summary())
     else:
         print(write_summary())
 

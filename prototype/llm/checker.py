@@ -101,6 +101,65 @@ def nurse_direction_errors(text, payload: dict) -> list[str]:
     return out
 
 
+_METRIC_PHRASE = {"QR": r"quick returns?", "SN": r"(?:last-minute )?call-ins?", "N": r"night shifts?",
+                  "OT": r"overtime", "LR": r"long stretch(?:es)?"}
+_ADD = re.compile(r"\b(adds?|added|adding|gives?|gave|more|extra|another)\b", re.I)
+
+
+def _added_by(opt: dict) -> dict:
+    return {m: sum(nd["after"][m] - nd["before"][m] for nd in opt.get("nurses", [])) for m in METRICS}
+
+
+_SENT_END = re.compile(r"[!?]|\.(?!\d)")  # option descriptions contain ';', so only real sentence ends
+_CLAUSE = re.compile(r",?\s*\b(?:while|whereas|unlike|but)\b", re.I)
+_COUNT_BEFORE_MORE = re.compile(r"\b(?:one|two|three|a|an|\d+)\s+more\b", re.I)
+
+
+def comparison_errors(text, payload: dict) -> list[str]:
+    """Heuristic check of claims about today's software's option and about the chosen option's cost.
+
+    Per clause (split at while/whereas/unlike/but):
+    - a clause about today's software (named, or its option description) saying it adds an item is flagged
+      when that option adds none of it; 'adds more <item>' (a comparison) is flagged when it adds no more
+      than the chosen option ('one more' counts as an amount, not a comparison);
+    - 'the cost is ... <item>' is flagged when the chosen option adds none of that item.
+    Clauses naming both options are skipped; nothing is checked when both picks are the same."""
+    if not isinstance(text, str):
+        return []
+    try:
+        dec = payload["decision"]
+        if dec.get("same_as_todays_software"):
+            return []
+        opts = {o["id"]: o for o in payload["options"]}
+        chosen, ortec = opts[dec["chosen"]], opts[dec["todays_software"]]
+        ca, oa = _added_by(chosen), _added_by(ortec)
+    except (KeyError, TypeError, AttributeError):
+        return []
+    cdesc, odesc = (chosen.get("description") or "").lower(), (ortec.get("description") or "").lower()
+    out: list[str] = []
+    start = 0
+    for end in [m.end() for m in _SENT_END.finditer(text)] + [len(text)]:
+        sent, start = text[start:end], end
+        for clause in _CLAUSE.split(sent.lower().replace("\u2019", "'")):
+            has_chosen = bool(cdesc) and cdesc in clause
+            about_ortec = (("today's software" in clause or (bool(odesc) and odesc in clause)) and not has_chosen
+                           and not re.search(r"than (?:today's software|“)", clause))  # "X more than today's" is about X
+            for m, pat in _METRIC_PHRASE.items():
+                hit = re.search(pat, clause)
+                if not hit:
+                    continue
+                before = clause[max(0, hit.start() - 40):hit.start()]
+                verbs = [v.lower() for v in _ADD.findall(before)]
+                if not verbs:
+                    continue
+                relative = "more" in verbs and not _COUNT_BEFORE_MORE.search(before)
+                if about_ortec and (oa[m] <= 0 or (relative and oa[m] <= ca[m])):
+                    out.append(f"today's software: '{clause.strip()[:80]}'")
+                elif not about_ortec and "the cost is" in clause and ca[m] <= 0:
+                    out.append(f"cost: '{clause.strip()[:80]}'")
+    return list(dict.fromkeys(out))
+
+
 def canon_nurse(value):
     """'Nurse 10' / 'nurse_10' / 'Nurse_010' -> 'Nurse_10'; anything else is returned unchanged."""
     m = _NURSE_REF.match(value) if isinstance(value, str) else None
@@ -264,15 +323,17 @@ def check_explanation(expl, payload: dict) -> dict:
     'verified', 'mismatch', or 'unavailable' (no model output). Never raises."""
     if not isinstance(expl, dict):
         return {"claims_total": 0, "claims_false": 0, "unsupported_numbers": [], "direction_errors": [],
-                "nurse_direction_errors": [], "no_claims": True, "verified": False, "status": "unavailable"}
+                "nurse_direction_errors": [], "comparison_errors": [], "no_claims": True, "verified": False,
+                "status": "unavailable"}
     try:
         r = check_text(expl.get("text"), expl.get("claims"), payload)
         r["nurse_direction_errors"] = nurse_direction_errors(expl.get("text"), payload)
+        r["comparison_errors"] = comparison_errors(expl.get("text"), payload)
     except Exception:  # junk model output must never break the endpoint
         r = {"claims_total": 0, "claims_false": 1, "unsupported_numbers": [], "direction_errors": [],
-             "nurse_direction_errors": []}
+             "nurse_direction_errors": [], "comparison_errors": []}
     r["no_claims"] = r["claims_total"] == 0
-    r["verified"] = (r["claims_false"] == 0 and not r["unsupported_numbers"]
-                     and not r["direction_errors"] and not r["nurse_direction_errors"])
+    r["verified"] = (r["claims_false"] == 0 and not r["unsupported_numbers"] and not r["direction_errors"]
+                     and not r["nurse_direction_errors"] and not r["comparison_errors"])
     r["status"] = "verified" if r["verified"] else "mismatch"
     return r
