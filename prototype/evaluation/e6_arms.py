@@ -171,6 +171,21 @@ def summary_markdown(runs: pd.DataFrame, expl: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def write_combined_csv(rd, runs: pd.DataFrame) -> None:
+    """One CSV, one row per arm x ward: roster metrics plus (arm B only) explanation metrics per model."""
+    out = runs.copy()
+    for f in sorted(rd.glob("e6_explanations_*.jsonl")):
+        rows = pd.DataFrame([json.loads(x) for x in f.read_text().splitlines() if x.strip()])
+        if not len(rows):
+            continue
+        tag = rows.model.iloc[0].replace(":", "_").replace(".", "_")
+        per = {sd: explanation_summary(g) for sd, g in rows.groupby("seed")}
+        for k in ("n_decisions", "valid_output_rate", "fact_check_pass_rate", "direction_error_rate", "mean_latency_s"):
+            out[f"{tag}_{k}"] = [per[sd][k] if arm == "B" and sd in per else None
+                                 for arm, sd in zip(out.arm, out.seed)]
+    out.to_csv(rd / "e6_arms_by_ward.csv", index=False)
+
+
 def write_summary() -> str:
     rd = _rd()
     runs = pd.read_csv(rd / "e6_runs.csv")
@@ -181,6 +196,7 @@ def write_summary() -> str:
             expl.append(explanation_summary(rows))
     if expl:
         pd.DataFrame(expl).to_csv(rd / "e6_explanations_summary.csv", index=False)
+    write_combined_csv(rd, runs)
     md = summary_markdown(runs, expl)
     (rd / "e6_summary.md").write_text(md)
     return md

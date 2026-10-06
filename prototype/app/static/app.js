@@ -904,6 +904,7 @@ function renderResults(r) {
   }
   $("#res-rel").innerHTML = parts.length ? `<div class="rel-title">How reliable are GenAI's explanations? (${esc(e.model ?? "")}, ${e.n_decisions ?? "?"} decisions)</div>${parts.join('<span class="sep">·</span>')}` +
     '<p class="muted">GenAI never changes the ranking or the choice — if it fails, the rule\'s choice stands.</p>' : "";
+  $("#res-rel").classList.toggle("hidden", !parts.length);
   $("#res-foot").textContent = "Simulated wards built from Erasmus MC and Dutch parameters. The experimental column replays the GenAI-chooser run" +
     (r.model ? ` (${r.model}).` : ".");
 }
