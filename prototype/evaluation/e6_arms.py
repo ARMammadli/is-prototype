@@ -164,8 +164,8 @@ def summary_markdown(runs: pd.DataFrame, expl: list[dict]) -> str:
                   "| Model | Decisions | Valid output | Fact-check pass | Direction error | Mean latency (s) |",
                   "|---|---|---|---|---|---|"]
         for e in expl:
-            lines.append(f"| {e['model']} | {e['n_decisions']} | {e['valid_output_rate']:.0%} | "
-                         f"{e['fact_check_pass_rate']:.0%} | {e['direction_error_rate']:.0%} | "
+            lines.append(f"| {e['model']} | {e['n_decisions']} | {e['valid_output_rate']:.1%} | "
+                         f"{e['fact_check_pass_rate']:.1%} | {e['direction_error_rate']:.1%} | "
                          f"{e['mean_latency_s']:.1f} |")
         lines.append("")
     return "\n".join(lines)
