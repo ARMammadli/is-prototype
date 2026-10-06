@@ -26,8 +26,8 @@
     <button id="btn-new">New scenario</button></span>
   <div class="toggle x-expert">
     <button class="mode" data-mode="baseline">Baseline: Today's software (ORTEC-style)</button>
-    <button class="mode active" data-mode="ai">Our solution: With GenAI</button>
-    <button class="mode" data-mode="strain">Hospital rule + GenAI explanation</button>
+    <button class="mode active" data-mode="strain">Rule ranks, GenAI explains, you decide</button>
+    <button class="mode experimental" data-mode="ai" title="Experimental arm C: GenAI picks the option">Experimental: GenAI chooses</button>
   </div>
   <span id="remaining" class="muted x-expert"></span>
   <span class="ff x-expert">
@@ -52,7 +52,7 @@
       <div id="event" class="big-line"></div>
       <button id="btn-next" class="primary hidden">Next sick call ▶</button>
       <div id="decide-card" class="hidden">
-        <h3 class="x-expert">GenAI decision <span id="decide-meta"></span></h3>
+        <h3 class="x-expert">GenAI decision (experimental) <span id="decide-meta"></span></h3>
         <div id="decide-head"></div>
         <p id="decide-text"></p>
         <details class="why x-expert"><summary>why?</summary><ul id="decide-issues"></ul></details>
@@ -60,7 +60,7 @@
       </div>
     </section>
     <section id="explain-card" class="card hidden x-expert">
-      <h2>Why the top option <span id="explain-meta"></span></h2>
+      <h2>GenAI explains the rule's choice <span id="explain-meta"></span></h2>
       <p id="explain-text"></p>
       <ul id="explain-claims"></ul>
     </section>
@@ -72,29 +72,30 @@
       <div id="genai-explains" class="explains x-presenter"></div>
       <p id="rule-line" class="rule-line x-expert"></p>
       <div class="x-presenter apply-row">
-        <button id="btn-apply-main" class="primary big" disabled>Apply GenAI's choice</button>
+        <button id="btn-apply-main" class="primary big" disabled>Accept the rule's choice</button>
+        <button id="btn-override-main" type="button" disabled>Choose another…</button>
         <span id="apply-status" class="muted"></span>
-        <span class="approve-note">The ward planner approves every change.</span>
+        <span class="approve-note">Rule ranks, GenAI explains, you decide.</span>
       </div>
     </section>
-    <section class="card opts-card x-expert"><h2>Repair options</h2><div id="options"></div>
+    <section class="card opts-card"><h2 id="opts-title">Ranked options (hospital rule)</h2><div id="options"></div>
       <p id="legend" class="muted"></p></section>
   </div>
   <section class="card a-auto">
-    <h2 class="step x-presenter auto-step"><span class="num">3</span>Let GenAI handle the next sick calls on its own</h2>
+    <h2 class="step x-presenter auto-step"><span class="num">3</span><span id="auto-step-title">Let the hospital rule handle the next sick calls</span></h2>
     <span id="auto-ctl" class="auto-ctl">
-      <button id="btn-autoplay" class="primary big">Let GenAI handle the next</button>
+      <button id="btn-autoplay" class="primary big">Let the hospital rule handle the next</button>
       <select id="auto-n" aria-label="Number of sick calls"><option>3</option><option selected>5</option><option>10</option></select>
       <span id="auto-ctl-tail">sick calls</span>
     </span>
     <div id="auto-card" class="hidden">
-      <h3><span id="auto-title">GenAI autoplay</span> <button id="btn-auto-stop" class="hidden">Stop</button></h3>
+      <h3><span id="auto-title">Autoplay</span> <button id="btn-auto-stop" class="hidden">Stop</button></h3>
       <div id="auto-head"></div>
       <progress id="auto-bar" max="1" value="0"></progress>
       <ul id="auto-list"></ul>
     </div>
   </section>
-  <section class="card a-score" id="score-card"><h2 id="score-title">This ward since GenAI took over</h2>
+  <section class="card a-score" id="score-card"><h2 id="score-title">This ward since the rule took over</h2>
     <div id="scoreboard"></div>
     <p id="tradeoff" class="tradeoff hidden"></p>
     <p id="score-note" class="score-note x-expert"></p>
@@ -130,12 +131,14 @@
 <dialog id="override-dlg">
   <form method="dialog">
     <h3>Why not the top option?</h3>
+    <label id="override-opt-wrap" class="hidden">Option <select id="override-opt"></select></label>
+    <label>Reason
     <select id="override-reason">
       <option value="local_knowledge">Local knowledge</option>
       <option value="preference">Nurse preference</option>
       <option value="skill_mix">Skill mix</option>
       <option value="other">Other</option>
-    </select>
+    </select></label>
     <menu><button value="cancel">Cancel</button><button value="ok" class="primary">Apply</button></menu>
   </form>
 </dialog>

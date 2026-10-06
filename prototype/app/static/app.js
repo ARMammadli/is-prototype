@@ -15,7 +15,10 @@ const tradeoffWord = (t) => TRADEOFF_WORD[t] ?? String(t ?? "").replaceAll("_", 
 const SHIFT_WORD = { D: "day", E: "evening", N: "night" };
 const shiftWords = (s) => String(s ?? "").replace(/(^|: |→ |; )([DEN])\b/g, (_, p, c) => `${p}${SHIFT_WORD[c]} shift`);
 const TODAY = "Today's software (ORTEC-style)";
-const MODE_LABEL = { baseline: TODAY, ai: "With GenAI", strain: "Hospital rule", auto: "Auto (hospital rule)", "auto-ai": "GenAI autoplay", "auto-strain": "Hospital rule autoplay", "auto-baseline": "Today's software autoplay", policy: "Policy" };
+const MODE_LABEL = { baseline: TODAY, ai: "GenAI chooses (experimental)", strain: "Rule ranks, GenAI explains", auto: "Auto (hospital rule)", "auto-ai": "GenAI-chooser autoplay (experimental)", "auto-strain": "Hospital rule autoplay", "auto-baseline": "Today's software autoplay", policy: "Policy" };
+// Column/label for "our" side: the rule-ranked choice by default; GenAI only in the experimental arm.
+const oursLabel = () => (mode === "ai" ? "GenAI chooses (experimental)" : "Rule-ranked choice");
+const oursShort = () => (mode === "ai" ? "GenAI" : "the hospital rule");
 const LOWER = ' <span class="metric-hint">(lower is better)</span>';
 // Display backstop for the presenter view: no "Option_N" ids, no "Nurse_NN" ids anywhere.
 const noOptionIds = (s) => String(s ?? "").replace(/\bOption_0*(\d+)\b/gi, (_, n) => { const d = descOf(`Option_${Number(n)}`); return d ? `“${d}”` : "another option"; });
@@ -29,9 +32,13 @@ function factsBadge(verified, presenter) {
 }
 const shortNotice = (h) => h < 48;
 let autoRunning = false;
-let autoMode = "ai";
+let autoMode = "strain";
 let autoTimer = null;
-let mode = "ai";
+let defaultMode = "strain";  // from policy.json "mode" (rule_explains -> strain, genai_chooser -> ai)
+let mode = "strain";
+let explanation = null;
+let explainPending = false;
+let explainError = null;
 let state = null;
 let options = [];
 let decision = null;
@@ -120,6 +127,9 @@ function hideExplanation() {
   decision = null;
   decisionError = null;
   decisionPending = false;
+  explanation = null;
+  explainPending = false;
+  explainError = null;
   reqToken++;
 }
 
@@ -223,52 +233,78 @@ function renderDecision(r) {
   $("#decide-meta").innerHTML = `<span class="src">${esc(r.source)} · ${r.latency_ms} ms</span>`;
 }
 
+// GenAI explains the rule's choice. The choice is already made: accept is enabled before this returns,
+// and if GenAI fails the ranked table stays without a narrative (the server logs the failure at apply).
+const EXPLAIN_UNAVAILABLE = "GenAI explanation unavailable — the rule's choice stands; see the ranked table.";
 async function explain() {
+  explainPending = true;
   $("#explain-card").classList.remove("hidden");
   clearShowFull("#explain-text");
-  $("#explain-text").textContent = "Generating explanation…";
+  $("#explain-text").textContent = "GenAI is writing an explanation…";
   $("#explain-meta").textContent = "";
   $("#explain-claims").innerHTML = "";
   const eid = state.event.event_id, tok = reqToken, m = mode;
   try {
     const r = await api("/api/explain", { method: "POST" });
     if (staleReq(tok, eid, m)) return;
+    explanation = r;
+    explainPending = false;
     renderExplanation(r);
-  } catch (e) { if (staleReq(tok, eid, m)) return; clearShowFull("#explain-text"); $("#explain-text").textContent = `Explanation unavailable: ${e.message}`; }
+  } catch (e) {
+    if (staleReq(tok, eid, m)) return;
+    explainError = e.message;
+    explainPending = false;
+    clearShowFull("#explain-text");
+    $("#explain-text").textContent = `${EXPLAIN_UNAVAILABLE} (${e.message})`;
+  }
+  renderCompare();
 }
 
-function renderExplanation(r) {
-  const e = r.explanation;
-  const c = r.check;
-  const badge = factsBadge(c.verified, isPresenter());
-  $("#explain-meta").innerHTML = `${badge} <span class="src">${esc(r.source)} · ${r.latency_ms} ms</span>`;
-  setAiText("#explain-text", r, e.text);
+function explanationIssues(c) {
   const issues = [];
   if (c.claims_false) issues.push(`${c.claims_false} of ${c.claims_total} numbers quoted by GenAI do not match the data`);
   if (c.unsupported_numbers.length) issues.push(`GenAI used numbers that are not in the data: ${c.unsupported_numbers.join(", ")}`);
-  if (!c.recommendation_correct) issues.push("GenAI recommended an option other than the hospital rule check's top pick");
-  if (c.direction_errors && c.direction_errors.length) issues.push(`GenAI wording says the opposite of the numbers (up vs down): ${c.direction_errors.join(", ")}`);
-  if (!c.tradeoff_correct) issues.push(`GenAI named "${tradeoffWord(e.main_tradeoff)}" as the main trade-off, but the data points to "${tradeoffWord(c.ground_truth)}"`);
-  $("#explain-claims").innerHTML = `<li>Main trade-off: ${esc(tradeoffWord(e.main_tradeoff))}</li>` +
-    issues.map((i) => `<li class="warn">${esc(i)}</li>`).join("");
+  const dir = (c.direction_errors || []).concat(c.nurse_direction_errors || []);
+  if (dir.length) issues.push(`GenAI wording says the opposite of the numbers (up vs down): ${dir.join(", ")}`);
+  return issues;
 }
 
-function askReason() {
+function renderExplanation(r) {
+  const c = r.check;
+  if (!r.explanation) {
+    $("#explain-meta").innerHTML = `<span class="src">${esc(r.source)} · ${r.latency_ms} ms</span>`;
+    clearShowFull("#explain-text");
+    $("#explain-text").textContent = EXPLAIN_UNAVAILABLE + (r.error ? ` (${r.error})` : "");
+    $("#explain-claims").innerHTML = "";
+    return;
+  }
+  const badge = factsBadge(c.verified, isPresenter());
+  $("#explain-meta").innerHTML = `${badge} <span class="src">${esc(r.source)} · ${r.latency_ms} ms</span>`;
+  setAiText("#explain-text", r, r.explanation.text);
+  $("#explain-claims").innerHTML = explanationIssues(c).map((i) => `<li class="warn">${esc(i)}</li>`).join("");
+}
+
+function askReason(pickFrom = null) {
   return new Promise((resolve) => {
     const dlg = $("#override-dlg");
     dlg.returnValue = "";
-    dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok" ? $("#override-reason").value : null), { once: true });
+    $("#override-opt-wrap").classList.toggle("hidden", !pickFrom);
+    if (pickFrom) $("#override-opt").innerHTML = pickFrom.map((o) =>
+      `<option value="${esc(o.id)}">#${o.rank}: ${esc(niceNurse(o.description))}</option>`).join("");
+    dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok"
+      ? { reason: $("#override-reason").value, option: pickFrom ? $("#override-opt").value : null } : null), { once: true });
     dlg.showModal();
   });
 }
 
-async function applyOption(opt) {
+async function applyOption(opt, givenReason = null) {
   if (applying) return;
-  let reason = null;
+  let reason = givenReason;
   const needsReason = mode === "ai" && aiPickId() ? opt.id !== aiPickId() : opt.rank !== 1;
-  if (needsReason) {
-    reason = await askReason();
-    if (!reason) return;
+  if (needsReason && !reason) {
+    const a = await askReason();
+    if (!a) return;
+    reason = a.reason;
   }
   applying = true;
   setApplyDisabled(true);
@@ -292,8 +328,19 @@ function setApplyDisabled(d) {
   if (d) $("#btn-apply-main").disabled = true; else renderApplyMain();
 }
 
+// Override from the presenter view: pick another ranked option and give a short reason.
+async function overrideMain() {
+  const top = mode === "ai" && aiPickId() ? aiPickId() : formulaTopId();
+  const others = options.filter((o) => o.id !== top);
+  if (!others.length) { toast("There is no other option for this sick call."); return; }
+  const a = await askReason(others);
+  if (!a) return;
+  const opt = options.find((o) => o.id === a.option);
+  if (opt) await applyOption(opt, a.reason);
+}
+
 async function applyMain() {
-  const id = aiPickId() || formulaTopId();
+  const id = (mode === "ai" ? aiPickId() : null) || formulaTopId();
   const opt = options.find((o) => o.id === id);
   if (!opt) { toast("GenAI's pick is not among the current options — refresh with Next sick call."); return; }
   await applyOption(opt);
@@ -302,9 +349,17 @@ async function applyMain() {
 function renderApplyMain() {
   const btn = $("#btn-apply-main"), st = $("#apply-status");
   if (!btn) return;
+  $("#btn-override-main").disabled = applying || autoRunning || options.length < 2 || mode === "baseline";
+  if (mode !== "ai") {  // rule-ranked: accept is available at once; GenAI's explanation never gates it
+    btn.textContent = "✓ Accept the rule's choice";
+    btn.disabled = applying || autoRunning || !options.length || mode === "baseline";
+    if (explainPending) st.innerHTML = '<span class="spinner"></span>GenAI is writing an explanation…';
+    else st.textContent = "";
+    return;
+  }
   const unavailable = !!decisionError || (decision && !decision.decision);
   const ready = !!aiPickId();
-  btn.textContent = unavailable ? (isPresenter() ? "Apply backup choice" : "Apply hospital rule's choice") : "Apply GenAI's choice";
+  btn.textContent = unavailable ? (isPresenter() ? "Apply backup choice" : "Apply hospital rule's choice") : "Apply GenAI's choice (experimental)";
   btn.disabled = applying || autoRunning || !options.length || mode !== "ai" || !(ready || unavailable);
   if (decisionPending && !decision && !decisionError) st.innerHTML = '<span class="spinner"></span>GenAI is thinking…';
   else st.textContent = unavailable ? (isPresenter() ? UNAVAILABLE : "GenAI could not decide this one — the hospital rule check's pick is used.") : "";
@@ -315,6 +370,8 @@ async function setMode(m) {
   document.querySelectorAll(".mode").forEach((b) => b.classList.toggle("active", b.dataset.mode === m));
   $("#policy-card").classList.toggle("hidden", m === "baseline");
   $("#btn-autoplay").textContent = `Let ${WHO[m]} handle the next`;
+  $("#auto-step-title").textContent = `Let ${WHO[m]} handle the next sick calls`;
+  $("#opts-title").textContent = m === "baseline" ? "Options (today's software order)" : "Ranked options (hospital rule)";
   $("#auto-ctl-tail").textContent = "sick calls";
   if (state) { await loadOptions(); render(); }
 }
@@ -328,7 +385,7 @@ async function setView(v) {
   document.body.classList.toggle("expert", v === "expert");
   $("#btn-view").textContent = v === "presenter" ? "Show details" : "Presenter view";
   try { localStorage.setItem("roster-view", v); } catch (e) { /* storage unavailable */ }
-  if (v === "presenter" && mode !== "ai") await setMode("ai");
+  if (v === "presenter" && mode === "baseline") await setMode(defaultMode);
   else if (state) render();
   if (decision && !decisionPending && !$("#decide-card").classList.contains("hidden")) renderDecision(decision);
 }
@@ -413,7 +470,7 @@ function renderPreview() {
   ].filter((r) => !pv || r[2]);
   const val = (m, k) => (m ? (k === "changes_per_repair" ? fix(m) : m[k]) : null);
   const cols = [0, 1, 2].filter((i) => (i !== 1 || a) && !(pv && i === 2));
-  const headCells = [`<th>${TODAY}</th>`, "<th>With GenAI (measured in our experiments)</th>", `<th>${RULE}</th>`];
+  const headCells = [`<th>${TODAY}</th>`, "<th>GenAI chooses (experimental, measured)</th>", `<th>${RULE}</th>`];
   const thead = "<tr><th></th>" + cols.map((i) => headCells[i]).join("") + "</tr>";
   const body = rows.map(([l, k]) => {
     const vals = [val(b, k), val(a, k), val(s, k)];
@@ -423,8 +480,8 @@ function renderPreview() {
   }).join("");
   const unf = (a ? [b.unfilled, a.unfilled] : [b.unfilled]).concat(pv ? [] : [s.unfilled]);
   const note = unf.every((u) => u === unf[0]) ? "Same coverage — the difference is who carries the load."
-    : `Coverage (unfilled shifts): today's software ${b.unfilled}${a ? ` · With GenAI ${a.unfilled}` : ""}${pv ? "" : ` · hospital rule check ${s.unfilled}`}`;
-  const missing = a ? "" : '<p class="muted-note">GenAI column: not measured for this seed (measured for seeds 0–9).</p>';
+    : `Coverage (unfilled shifts): today's software ${b.unfilled}${a ? ` · GenAI chooses ${a.unfilled}` : ""}${pv ? "" : ` · hospital rule check ${s.unfilled}`}`;
+  const missing = a ? "" : '<p class="muted-note">GenAI-chooser column: not measured for this seed (measured for seeds 0–4).</p>';
   el.innerHTML = `<table class="cmp">${thead}${body}</table><p class="banner-note">${note}</p>${missing}`;
 }
 
@@ -456,10 +513,34 @@ function cardHtml(title, lines, rest, cls, tag, how) {
 }
 
 // Presenter view: two side-by-side choice cards built from the server's deterministic card_lines.
+function explainBubble() {
+  if (explainPending) return '<div class="bubble"><div class="lbl">✨ GenAI explains the rule\'s choice</div><p class="muted"><span class="spinner"></span>GenAI is writing an explanation… (you can already accept)</p></div>';
+  const r = explanation;
+  if (explainError || (r && !r.explanation)) return `<div class="bubble"><div class="lbl">✨ GenAI explanation</div><p class="muted">${esc(EXPLAIN_UNAVAILABLE)}</p></div>`;
+  if (!r) return "";
+  const text = niceNurse(r.display_text ?? r.explanation.text);
+  return `<div class="bubble"><div class="lbl">✨ GenAI explains the rule's choice</div><p>${esc(text)}</p>${factsBadge(r.check.verified, true)}</div>`;
+}
+
+function renderRuleCards() {
+  const lines = comparison.card_lines;
+  const rest = (lines && lines.rest_lines) || comparison.rest_lines || {};
+  const ORTEC_HOW = "Looks for: free contract hours and the fewest shift changes. Does not look at how tired anyone is.";
+  const RULE_HOW = "Ranks every legal option with the hospital's fairness formula: rest, nights, overtime and last-minute calls over 8 weeks.";
+  const ortec = cardHtml("🖥️ Today's software", lines ? lines.ortec : [comparison.ortec.description], rest.ortec, "ortec", "Simplest fix", ORTEC_HOW);
+  const same = comparison.ours.id === comparison.ortec.id;
+  const ours = cardHtml("⚖️ Hospital rule's choice", lines ? lines.ours : [comparison.ours.description], rest.ours, "genai",
+    same ? "Ranked #1 · same as today's software" : "Ranked #1", RULE_HOW);
+  const diffText = niceNurse(comparison.difference || comparison.who_words || "");
+  const diff = diffText ? `<div class="diff"><span class="diff-lbl">👉 The difference</span>${esc(diffText)}</div>` : "";
+  $("#compare").innerHTML = `<div class="choice-cards vs-cards">${ortec}<div class="vs">vs</div>${ours}</div>${diff}`;
+  $("#genai-explains").innerHTML = explainBubble();
+}
+
 function renderCards(c, backup = false) {
   const lines = (c && c.card_lines) || comparison.card_lines;
   const rest = (lines && lines.rest_lines) || (comparison && comparison.rest_lines) || {};
-  const ORTEC_T = "🖥️ Today's software", GENAI_T = "✨ With GenAI";
+  const ORTEC_T = "🖥️ Today's software", GENAI_T = "✨ GenAI chooses (experimental)";
   const ORTEC_HOW = "Looks for: free contract hours and the fewest shift changes. Does not look at how tired anyone is.";
   const GENAI_HOW = "Looks at: every nurse's rest, nights, overtime and last-minute calls over 8 weeks, then picks the fairest fix.";
   const ortec = cardHtml(ORTEC_T, lines ? lines.ortec : [comparison.ortec.description], rest.ortec, "ortec", "Simplest fix", ORTEC_HOW);
@@ -488,9 +569,9 @@ function renderCompare() {
   const words = (c) => (isPresenter() ? niceNurse(c.who_words ?? c.plain_words) : c.plain_words);
   if (mode === "ai") {
     if (isPresenter()) $("#compare-title").innerHTML = '<span class="step"><span class="num">2</span>Two ways to fill the gap</span>';
-    else $("#compare-title").textContent = "This decision: Today's software vs With GenAI";
-    const thead = isPresenter() ? "<tr><th></th><th>Today's software</th><th>With GenAI</th></tr>"
-      : "<tr><th></th><th>Today's software would…</th><th>With GenAI</th></tr>";
+    else $("#compare-title").textContent = "This decision: Today's software vs GenAI chooses (experimental)";
+    const thead = isPresenter() ? "<tr><th></th><th>Today's software</th><th>GenAI chooses</th></tr>"
+      : "<tr><th></th><th>Today's software would…</th><th>GenAI chooses (experimental)</th></tr>";
     const c = decision && decision.comparison ? decision.comparison : null;
     const failed = decisionError || (decision && !decision.decision);
     if (failed && isPresenter() && comparison.card_lines) { renderCards(null, true); return; }
@@ -510,8 +591,13 @@ function renderCompare() {
     $("#plain-text").textContent = c ? words(c) : "";
     return;
   }
-  $("#compare-title").textContent = "This decision: Today's software vs hospital rule check";
-  const col = mode === "strain" ? `${RULE} does…` : `${RULE} would…`;
+  if (mode === "strain" && isPresenter()) {
+    $("#compare-title").innerHTML = '<span class="step"><span class="num">2</span>Two ways to fill the gap — the rule ranks, you decide</span>';
+    renderRuleCards();
+    return;
+  }
+  $("#compare-title").textContent = "This decision: Today's software vs hospital rule";
+  const col = mode === "strain" ? `${RULE} ranks #1…` : `${RULE} would…`;
   $("#compare").innerHTML = compareRows(comparison.ortec, comparison.ours,
     `<tr><th></th><th>Today's software would…</th><th>${col}</th></tr>`);
   $("#plain-text").textContent = words(comparison);
@@ -530,8 +616,8 @@ function countersHtml(st) {
   const qr = (label, v) => `<div class="side"><span class="who">${label}</span><span class="big ${v < 0 ? "win" : v > 0 ? "bad" : ""}">${esc(signedWord(v))}</span></div>`;
   const cost = (label, val) => `<div class="side"><span class="who">${label}</span><span class="big">${esc(signedWord(val))}</span></div>`;
   return `<div class="counters">
-    <div class="counter benefit"><div class="kind">The benefit</div><div class="what">Short rests between shifts (under 11 h)</div><div class="pair">${qr("Today's software", r.quick_returns_change)}${qr("With GenAI", o.quick_returns_change)}</div><div class="cap">Change on the roster since GenAI took over — fewer is better</div></div>
-    <div class="counter price"><div class="kind">The price</div><div class="what">Extra last-minute calls to nurses</div><div class="pair">${cost("Today's software", r.extra_late_calls)}${cost("With GenAI", o.extra_late_calls)}</div><div class="cap">Nurses asked to change their plans at short notice</div></div></div>`;
+    <div class="counter benefit"><div class="kind">The benefit</div><div class="what">Short rests between shifts (under 11 h)</div><div class="pair">${qr("Today's software", r.quick_returns_change)}${qr(oursLabel(), o.quick_returns_change)}</div><div class="cap">Change on the roster since ${oursShort()} took over — fewer is better</div></div>
+    <div class="counter price"><div class="kind">The price</div><div class="what">Extra last-minute calls to nurses</div><div class="pair">${cost("Today's software", r.extra_late_calls)}${cost(oursLabel(), o.extra_late_calls)}</div><div class="cap">Nurses asked to change their plans at short notice</div></div></div>`;
 }
 
 function renderScoreboard() {
@@ -545,33 +631,34 @@ function renderScoreboard() {
     const n = st.calls_handled;
     $("#score-title").innerHTML = `<span class="step"><span class="num">4</span>Score so far</span> <span class="score-sub">${n} sick call${n === 1 ? "" : "s"} handled — same sick calls for both</span>`;
     $("#scoreboard").innerHTML = n ? countersHtml(st)
-      : '<p class="score-empty">Apply GenAI\'s choice or let GenAI handle the next sick calls — the score starts counting here.</p>';
+      : `<p class="score-empty">Accept a choice or let ${oursShort()} handle the next sick calls — the score starts counting here.</p>`;
     more = st.ours.extra_late_calls > st.ortec.extra_late_calls;
   } else {
-    $("#score-title").textContent = "This ward since GenAI took over";
+    $("#score-title").textContent = `This ward since ${oursShort()} took over`;
     const rows = [["Quick returns", "quick_returns", true], ["Nurses with 3+ quick returns in 4 weeks", "nurses_qr_ge3_28d", true],
       ["Highest nurse tiredness score", "max_load"], ["Last-minute call-ins", "short_notice_calls", true], ["Shifts changed", "shifts_changed"]];
-    $("#scoreboard").innerHTML = `<table class="cmp"><tr><th></th><th>Today's software</th><th>With GenAI</th></tr>` +
+    $("#scoreboard").innerHTML = `<table class="cmp"><tr><th></th><th>Today's software</th><th>${oursLabel()}</th></tr>` +
       rows.map(([l, k]) => { const [cx, cy] = cmpClass(ortec[k], ours[k]);
         return `<tr><td>${l}${LOWER}</td><td class="${cx}">${ortec[k]}</td><td class="${cy}">${ours[k]}</td></tr>`; }).join("") + "</table>";
     const diff = ortec.quick_returns - ours.quick_returns;
-    $("#score-note").textContent = !history.length ? "" : diff > 0 ? `GenAI: −${diff} quick returns vs today's software so far`
-      : diff < 0 ? `GenAI: +${-diff} quick returns vs today's software so far` : "GenAI: same number of quick returns as today's software so far";
+    const who = oursLabel();
+    $("#score-note").textContent = !history.length ? "" : diff > 0 ? `${who}: −${diff} quick returns vs today's software so far`
+      : diff < 0 ? `${who}: +${-diff} quick returns vs today's software so far` : `${who}: same number of quick returns as today's software so far`;
     more = ours.short_notice_calls > ortec.short_notice_calls;
   }
   tr.classList.toggle("hidden", !more);
-  tr.textContent = more ? "⚖️ The trade-off: GenAI makes a few more phone calls to spare tired nurses from short rests." : "";
+  tr.textContent = more ? `⚖️ The trade-off: ${oursShort()} makes a few more phone calls to spare tired nurses from short rests.` : "";
   if (!window.Chart || pres) return;
   const labels = [0, ...history.map((h) => h.n)];
   const first = start ? start.qr : null;
   const datasets = [
     { label: "Today's software", data: [first, ...history.map((h) => h.ortec_qr)], borderColor: "#9ca3af", backgroundColor: "#9ca3af", pointRadius: 0, tension: 0.2 },
-    { label: "With GenAI", data: [first, ...history.map((h) => h.ours_qr)], borderColor: "#1f6feb", backgroundColor: "#1f6feb", pointRadius: 0, tension: 0.2 }];
+    { label: oursLabel(), data: [first, ...history.map((h) => h.ours_qr)], borderColor: "#1f6feb", backgroundColor: "#1f6feb", pointRadius: 0, tension: 0.2 }];
   const data = { labels, datasets };
   if (scoreChart) { scoreChart.data = data; scoreChart.update(); return; }
   scoreChart = new Chart($("#score-chart"), { type: "line", data, options: { animation: false, maintainAspectRatio: false,
     plugins: { title: { display: true, text: "Quick returns after each sick call (lower is better)" }, legend: { position: "bottom" } },
-    scales: { x: { title: { display: true, text: "Sick calls since GenAI took over" } }, y: {} } } });
+    scales: { x: { title: { display: true, text: "Sick calls handled" } }, y: {} } } });
 }
 
 function applyBtn(o) {
@@ -589,9 +676,24 @@ function metricCell(n, m) {
   return `<span class="${a > b ? "up" : ""}">${esc(n.nurse)}: ${b} → ${a}</span>`;
 }
 
+// Presenter: a compact ranked table (top 5) — rule rank, what happens, load change, today's-software rank.
+function renderOptionsCompact(el) {
+  const ortecTop = options.find((o) => o.rank_baseline === 1);
+  const rows = options.slice(0, 5).map((o) => {
+    const tags = (o.rank === 1 ? '<span class="tag formula">Rule\'s choice</span>' : "") +
+      (o.rank_baseline === 1 ? '<span class="tag">Today\'s software</span>' : "");
+    return `<tr class="${o.rank === 1 ? "top" : ""}"><td>${o.rank}</td><td>${esc(niceNurse(o.description))}${tags}</td>` +
+      `<td>${o.n_changes}</td><td>${signedWord(Number(o.delta_strain.toFixed(1)))}</td><td>${o.rank_baseline}</td></tr>`;
+  }).join("");
+  const more = options.length > 5 ? `<p class="muted">+ ${options.length - 5} more legal options${ortecTop && ortecTop.rank > 5 ? ` (today's software's pick is ranked #${ortecTop.rank})` : ""}.</p>` : "";
+  el.innerHTML = `<table class="opts"><tr><th>Rule rank</th><th>What happens</th><th>Shifts changed</th>` +
+    `<th title="Change in the combined tiredness score of the nurses involved">Load change</th><th>Today's software rank</th></tr>${rows}</table>${more}`;
+}
+
 function renderOptions() {
   const el = $("#options");
   if (!options.length) { el.innerHTML = ""; return; }
+  if (isPresenter() && mode !== "baseline") { renderOptionsCompact(el); return; }
   const RANK_TIP = "Rank by the hospital rule check (tiredness score; 1 = recommended)";
   const ORTEC_TIP = "Rank by today's software: fewest changes, then contract fit";
   const head = mode === "baseline"
@@ -767,7 +869,7 @@ async function loadResults() {
 
 function renderResults(r) {
   const na = !r || !r.available;
-  $("#res-title").textContent = na ? "Results across all wards" : `Results across ${r.n_wards} simulated wards (8 weeks each, same sick calls for both methods)`;
+  $("#res-title").textContent = na ? "Results across all wards" : `Results across ${r.n_wards} simulated wards (8 weeks each, same sick calls for every method)`;
   $("#res-chart-box").classList.toggle("hidden", na);
   if (na) {
     $("#res-hero").textContent = "";
@@ -776,28 +878,34 @@ function renderResults(r) {
     return;
   }
   const n = r.n_wards;
-  const qr = r.metrics.find((m) => m.key === "QR_total");
-  if (qr && qr.change_pct !== null) {
-    const x = Math.round(Math.abs(qr.change_pct));
-    $("#res-hero").textContent = `With GenAI: ${x}% ${qr.change_pct <= 0 ? "fewer" : "more"} quick returns — better on ${qr.wins} of ${n} wards.`;
+  const ge3 = r.metrics.find((m) => m.key === "nurses_qr_ge3_28d");
+  if (ge3 && ge3.change_pct !== null) {
+    const x = Math.round(Math.abs(ge3.change_pct));
+    $("#res-hero").textContent = `Rule ranks, GenAI explains: ${x}% ${ge3.change_pct <= 0 ? "fewer" : "more"} nurses with 3+ quick returns in 4 weeks — better on ${ge3.wins} of ${n} wards.`;
   } else $("#res-hero").textContent = "";
-  const cell = (side, key) => { const d = key === "changes_per_repair" ? 2 : 1;
+  const cell = (side, key) => { if (!side) return '<span class="flat">–</span>'; const d = key === "changes_per_repair" ? 2 : 1;
     return `${fmtNum(side.mean, d)}<span class="rng">(range ${fmtNum(side.min, d)}–${fmtNum(side.max, d)})</span>`; };
   const chg = (m) => { if (m.change_pct === null) return '<span class="flat">–</span>';
     const v = Math.round(m.change_pct);
     return `<span class="${v < 0 ? "good" : v > 0 ? "badc" : "flat"}">${v > 0 ? "+" : v < 0 ? MINUS : ""}${Math.abs(v)}%</span>`; };
   const rows = r.metrics.map((m) => `<tr class="${m.cost ? "cost" : ""}"><td>${esc(m.label)}${m.cost ? ' <span class="tag-cost">(the cost)</span>' : ""}</td>` +
-    `<td class="num">${cell(m.baseline, m.key)}</td><td class="num">${cell(m.ai, m.key)}</td><td class="num">${chg(m)}</td>` +
-    `<td class="num">${m.wins} of ${n}${m.ties ? ` <span class="tag-cost">(${m.ties} tied)</span>` : ""}</td></tr>`).join("");
-  $("#res-table").innerHTML = `<table class="res"><tr><th>Metric</th><th class="num">Today's software</th><th class="num">With GenAI</th><th class="num">Change</th><th class="num">Wards where GenAI is better</th></tr>${rows}</table>`;
+    `<td class="num">${cell(m.baseline, m.key)}</td><td class="num">${cell(m.ours, m.key)}</td><td class="num">${chg(m)}</td>` +
+    `<td class="num">${m.wins} of ${n}${m.ties ? ` <span class="tag-cost">(${m.ties} tied)</span>` : ""}</td>` +
+    `<td class="num exp">${cell(m.exp, m.key)}</td></tr>`).join("");
+  $("#res-table").innerHTML = `<table class="res"><tr><th>Metric</th><th class="num">Today's software</th><th class="num">Rule ranks, GenAI explains</th>` +
+    `<th class="num">Change</th><th class="num">Wards where the rule is better</th><th class="num exp">GenAI chooses (experimental)</th></tr>${rows}</table>`;
   renderResultsChart(r);
-  const rel = r.reliability || {}, parts = [];
-  if (rel.verified_rate != null) parts.push(`Facts checked in <b>${Math.round(rel.verified_rate * 100)}%</b> of explanations`);
-  if (rel.fallback_rate != null) parts.push(`a backup was needed in <b>${Math.round(rel.fallback_rate * 100)}%</b> of decisions`);
-  if (rel.seconds_per_decision != null) parts.push(`about <b>${Math.round(rel.seconds_per_decision)} s</b> per decision`);
-  $("#res-rel").innerHTML = parts.length ? `<div class="rel-title">How reliable is GenAI?</div>${parts.join('<span class="sep">·</span>')}` : "";
-  $("#res-foot").textContent = "Simulated wards built from Erasmus MC and Dutch parameters; the measured GenAI model " +
-    (r.model ? `is ${r.model}.` : "is shown in the data.");
+  const e = r.explanations, parts = [];
+  if (e) {
+    if (e.fact_check_pass_rate != null) parts.push(`Fact check passed for <b>${Math.round(e.fact_check_pass_rate * 100)}%</b> of explanations`);
+    if (e.direction_error_rate != null) parts.push(`wording direction wrong in <b>${Math.round(e.direction_error_rate * 100)}%</b>`);
+    if (e.valid_output_rate != null) parts.push(`valid output <b>${Math.round(e.valid_output_rate * 100)}%</b>`);
+    if (e.mean_latency_s != null) parts.push(`about <b>${Math.round(e.mean_latency_s)} s</b> per explanation`);
+  }
+  $("#res-rel").innerHTML = parts.length ? `<div class="rel-title">How reliable are GenAI's explanations? (${esc(e.model ?? "")}, ${e.n_decisions ?? "?"} decisions)</div>${parts.join('<span class="sep">·</span>')}` +
+    '<p class="muted">GenAI never changes the ranking or the choice — if it fails, the rule\'s choice stands.</p>' : "";
+  $("#res-foot").textContent = "Simulated wards built from Erasmus MC and Dutch parameters. The experimental column replays the GenAI-chooser run" +
+    (r.model ? ` (${r.model}).` : ".");
 }
 
 function renderResultsChart(r) {
@@ -805,7 +913,7 @@ function renderResultsChart(r) {
   const names = { QR_total: "Quick returns", nurses_qr_ge3_28d: "Nurses with 3+ quick returns", max_qr: "Most quick returns for one nurse" };
   const ms = keys.map((k) => r.metrics.find((m) => m.key === k)).filter(Boolean);
   const avg = ms.map((m) => (m.change_pct === null ? null : Number(m.change_pct.toFixed(1))));
-  $("#res-cap").textContent = "Average change versus today's software across all wards: below zero means fewer, which is better.";
+  $("#res-cap").textContent = "Rule-ranked vs today's software, average change across all wards: below zero means fewer, which is better.";
   if (!window.Chart) return;
   const data = { labels: ms.map((m) => names[m.key]), datasets: [
     { label: "Average of all wards", data: avg, backgroundColor: "#15803d" }] };
@@ -817,8 +925,8 @@ function renderResultsChart(r) {
 }
 
 // ---- GenAI autoplay --------------------------------------------------------------------------
-const BUSY_SELECTORS = "#btn-start, #btn-view, #btn-new, #btn-next, #btn-ff, #btn-auto, #btn-autoplay, #auto-n, #policy-form button, #btn-apply-proposal, #btn-translate, .mode";
-const WHO = { ai: "GenAI", strain: "the hospital rule check", baseline: "today's software" };
+const BUSY_SELECTORS = "#btn-start, #btn-view, #btn-new, #btn-next, #btn-ff, #btn-auto, #btn-autoplay, #auto-n, #policy-form button, #btn-apply-proposal, #btn-translate, #btn-override-main, .mode";
+const WHO = { ai: "GenAI (experimental)", strain: "the hospital rule", baseline: "today's software" };
 
 function setBusy(running) {
   autoRunning = running;
@@ -832,7 +940,7 @@ function renderAutoItem(it) {
   const pv = isPresenter();
   const line = document.createElement("div");
   if (pv) {
-    const by = /^Formula/.test(it.by) ? "Backup choice" : it.by === "ORTEC-like" ? "Today's software" : String(it.by);
+    const by = /fallback/.test(it.by) ? "Backup choice" : it.by === "Formula" ? "Hospital rule" : it.by === "ORTEC-like" ? "Today's software" : String(it.by);
     line.textContent = niceNurse(`Sick call: ${it.absent} — ${String(it.shift).toLowerCase()} shift, day ${it.day} → ${by}: ${it.description ?? it.chosen_change_text}`);
   } else {
     const nurse = it.chosen_nurse ? `${it.chosen_nurse} (${it.chosen})` : it.chosen;
@@ -924,6 +1032,7 @@ async function loadAudit() {
 document.addEventListener("DOMContentLoaded", () => {
   $("#btn-start").addEventListener("click", () => guarded(startPresenter));
   $("#btn-apply-main").addEventListener("click", () => guarded(applyMain));
+  $("#btn-override-main").addEventListener("click", () => guarded(overrideMain));
   $("#btn-view").addEventListener("click", () => guarded(() => setView(isPresenter() ? "expert" : "presenter")));
   $("#btn-new").addEventListener("click", () => guarded(newScenario));
   $("#btn-next").addEventListener("click", () => guarded(nextEvent));
@@ -941,8 +1050,9 @@ document.addEventListener("DOMContentLoaded", () => {
     state = await api("/api/state");
     await loadPolicy();
     if (state.autoplay_running) autoRunning = true;
+    defaultMode = state.default_mode || "strain";
     await setView(storedView());
-    await setMode("ai");
+    await setMode(defaultMode);
     render();
     await loadAudit();
     if (state.autoplay_running) watchAutoplay();

@@ -36,13 +36,16 @@ def test_full_repair_flow_and_audit(client):
     assert base[0]["rank"] == 1 and "contract_h" in base[0]
     assert strain[0]["rank"] == 1 and "nurses" in strain[0]
     assert {o["id"] for o in base} <= {o["id"] for o in client.get("/api/options?mode=strain&limit=100").json()["options"]}
-    ex = client.post("/api/explain").json()
-    assert ex["source"] == "template" and ex["check"]["verified"]
+    ex = client.post("/api/explain").json()  # LLM down: no narrative, the rule's choice stands
+    assert ex["source"] == "unavailable" and ex["explanation"] is None and ex["display_text"] is None
+    assert ex["check"]["status"] == "unavailable" and ex["chosen_option"] == strain[0]["id"]
     assert ex["event_id"] == ev["event_id"]
     r = client.post("/api/apply", json={"event_id": ev["event_id"], "option_id": strain[0]["id"], "mode": "strain"})
     assert r.status_code == 200 and r.json()["state"]["event"] is None
-    entries = client.get("/api/audit").json()["entries"]
-    assert entries[-1]["option_id"] == strain[0]["id"] and entries[-1]["explanation_source"] == "template"
+    e = client.get("/api/audit").json()["entries"][-1]
+    assert e["option_id"] == strain[0]["id"] and e["explanation_source"] == "unavailable"
+    assert e["explanation_status"] == "unavailable" and "ConnectError" in e["explanation_error"]
+    assert e["ranking"][0] == strain[0]["id"] and e["accepted_top"] is True and e["ortec_choice"].startswith("Option_")
 
 
 def test_non_top_without_reason_is_rejected_then_accepted_with_reason(client):
@@ -119,7 +122,8 @@ def test_unknown_option_and_bad_reason(client):
 def test_response_shapes(client):
     ev = _open_event(client)
     s = client.get("/api/state").json()
-    assert set(s) == {"seed", "days", "nurses", "grid", "changed", "absent", "leave", "event",
+    assert s["app_mode"] == "rule_explains" and s["default_mode"] == "strain"
+    assert set(s) == {"seed", "app_mode", "default_mode", "days", "nurses", "grid", "changed", "absent", "leave", "event",
                       "remaining_events", "unfilled", "strain", "kpis", "preview", "headline", "scoreboard", "since_takeover", "autoplay_running"}
     assert set(s["event"]) == {"event_id", "absent", "day", "shift", "notice_h", "unfilled"}
     assert set(s["kpis"]) == {"gini", "top10_qr_share", "max_qr"}
@@ -414,10 +418,24 @@ def test_display_short_truncates_long_text(client, monkeypatch):
     assert d["display_text"] == long and d["decision"]["reasoning"] == long
 
 
-def test_template_explanation_has_display_text(client):
-    _open_event(client)
+def test_explain_gets_rule_choice_and_policy_text_and_never_picks(client, monkeypatch):
+    import json
+    seen = {}
+
+    def fake(system, user, schema, model, timeout):
+        seen["payload"], seen["schema"] = json.loads(user), schema
+        return {"claims": [], "text": "Pick another option instead."}, None
+    monkeypatch.setattr("llm.service.chat_json", fake)
+    ev = _open_event(client)
+    client.put("/api/policy", json={"weights": load_json("policy.json")["weights"], "forward_days": 28,
+                                    "squared": True, "source": "genai", "policy_text": "Protect night workers."})
+    top = client.get("/api/options?mode=strain").json()["options"][0]["id"]
     ex = client.post("/api/explain").json()
-    assert "display_text" in ex and " QR " not in ex["display_text"]
+    assert "chosen_option" not in seen["schema"]["properties"] and "recommended_option" not in seen["schema"]["properties"]
+    assert seen["payload"]["decision"]["chosen"] == top == ex["chosen_option"]
+    assert seen["payload"]["policy_text"] == "Protect night workers."
+    r = client.post("/api/apply", json={"event_id": ev["event_id"], "option_id": top, "mode": "strain"})
+    assert r.status_code == 200  # the model's words cannot move the choice
 
 
 def _first_id(system, user, schema, model, timeout):
@@ -651,54 +669,50 @@ def test_comparison_card_lines_in_options(client):
 
 
 # ---- /api/results ---------------------------------------------------------------------------------
-RES_COLS = "seed,policy,QR_total,nurses_qr_ge3_28d,max_qr,unfilled,SN_total,changes_per_repair"
+RES_COLS = "arm,seed,QR_total,nurses_qr_ge3_28d,max_qr,unfilled,SN_total,changes_per_repair"
 
 
-def _res_files(tmp_path, e5_extra="", ai_rows=None):
-    ai_rows = ai_rows if ai_rows is not None else ["0,ai,100,10,5,1,80,1.5", "1,ai,90,8,4,0,70,1.6"]
-    cols = RES_COLS + (",model,verified_rate,fallback_rate,latency_p50_ms" if e5_extra else "")
-    ai = [r + (f",{e5_extra}" if e5_extra else "") for r in ai_rows]
-    (tmp_path / "e5_runs.csv").write_text("\n".join([cols] + ai + ["0,baseline,1,1,1,1,1,1"]) + "\n")
-    base = ["0,baseline,200,20,6,1,50,1.0", "1,baseline,100,10,3,0,60,1.0", "2,baseline,5,5,5,5,5,1", "0,strain,1,1,1,1,1,1"]
-    (tmp_path / "e1_runs.csv").write_text("\n".join([RES_COLS] + base) + "\n")
+def _res_files(tmp_path, b_rows=None, expl=None):
+    b_rows = b_rows if b_rows is not None else ["B,0,100,10,5,1,80,1.5", "B,1,90,8,4,0,70,1.6"]
+    rows = ["A,0,200,20,6,1,50,1.0", "A,1,100,10,3,0,60,1.0", "A,2,5,5,5,5,5,1", "C,0,120,12,5,1,90,1.9"] + b_rows
+    (tmp_path / "e6_runs.csv").write_text("\n".join([RES_COLS] + rows) + "\n")
+    if expl:
+        (tmp_path / "e6_explanations_summary.csv").write_text(
+            "model,n_decisions,valid_output_rate,fact_check_pass_rate,direction_error_rate,mean_latency_s\n" + expl + "\n")
 
 
 def test_results_values(client, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    _res_files(tmp_path, e5_extra="qwen3:4b,0.5,0.1,12000")
+    _res_files(tmp_path, expl="qwen3:8b,400,1.0,0.9,0.05,10.2")
     r = client.get("/api/results").json()
-    assert r["available"] and r["n_wards"] == 2 and r["model"] == "qwen3:4b"  # seed 2 has no GenAI row
+    assert r["available"] and r["n_wards"] == 2 and r["n_exp_wards"] == 1  # seed 2 has no B row
     qr = next(m for m in r["metrics"] if m["key"] == "QR_total")
     assert qr["baseline"] == {"mean": 150.0, "min": 100.0, "max": 200.0}
-    assert qr["ai"] == {"mean": 95.0, "min": 90.0, "max": 100.0} and qr["wins"] == 2 and qr["cost"] is False
+    assert qr["ours"] == {"mean": 95.0, "min": 90.0, "max": 100.0} and qr["wins"] == 2 and qr["cost"] is False
+    assert qr["exp"] == {"mean": 120.0, "min": 120.0, "max": 120.0} and qr["exp_wins"] == 1
     assert round(qr["change_pct"], 1) == -36.7
     mx = next(m for m in r["metrics"] if m["key"] == "max_qr")
     assert mx["wins"] == 1 and mx["ties"] == 0  # ward 2: 4 vs 3 is worse
     sn = next(m for m in r["metrics"] if m["key"] == "SN_total")
     assert sn["cost"] is True and sn["wins"] == 0
-    assert [w["ward"] for w in r["wards"]] == [1, 2] and r["wards"][0]["values"]["QR_total"] == {"baseline": 200.0, "ai": 100.0}
-    assert r["reliability"] == {"verified_rate": 0.5, "fallback_rate": 0.1, "latency_p50_ms": 12000.0,
-                                "seconds_per_decision": 12.0}
+    assert [w["ward"] for w in r["wards"]] == [1, 2]
+    assert r["wards"][0]["values"]["QR_total"] == {"baseline": 200.0, "ours": 100.0, "exp": 120.0}
+    assert r["explanations"]["fact_check_pass_rate"] == 0.9 and r["explanations"]["model"] == "qwen3:8b"
 
 
-def test_results_without_reliability_columns(client, monkeypatch, tmp_path):
+def test_results_without_explanations(client, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
     _res_files(tmp_path)
     r = client.get("/api/results").json()
-    assert r["available"] and r["model"] is None
-    assert r["reliability"] == {"verified_rate": None, "fallback_rate": None, "latency_p50_ms": None,
-                                "seconds_per_decision": None}
+    assert r["available"] and r["explanations"] is None
 
 
 def test_results_missing_or_bad_files(client, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
     assert client.get("/api/results").json() == {"available": False}  # nothing there
-    _res_files(tmp_path)
-    (tmp_path / "e1_runs.csv").unlink()
-    assert client.get("/api/results").json() == {"available": False}  # one file missing
-    _res_files(tmp_path, ai_rows=["0,ai,nan,10,5,1,80,1.5", "1,ai,,8,4,0,70,1.6"])
+    _res_files(tmp_path, b_rows=["B,0,nan,10,5,1,80,1.5", "B,1,,8,4,0,70,1.6"])
     assert client.get("/api/results").json() == {"available": False}  # non-finite / blank rows are skipped
-    (tmp_path / "e5_runs.csv").write_text("garbage\n")
+    (tmp_path / "e6_runs.csv").write_text("garbage\n")
     assert client.get("/api/results").json() == {"available": False}
 
 

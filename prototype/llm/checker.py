@@ -46,6 +46,61 @@ def direction_errors(text) -> list[str]:
     return out
 
 
+_NURSE_MENTION = re.compile(r"\bnurse[ _]?0*(\d+)\b", re.I)
+_UP_WORD = re.compile(r"\b(more|extra|additional|add\w*|increas\w*|rais\w*|ris\w*|gain\w*|takes on|picks up)\b", re.I)
+_DOWN_WORD = re.compile(r"\b(reliev\w*|relief|spar\w*|fewer|less|reduc\w*|lower\w*|drop\w*|decreas\w*|cut\w*|free\w*)\b", re.I)
+# The style guide's own phrase for a quick return contains "less"; it is not a direction word.
+_QR_PHRASE = re.compile(r"less than 11 hours'?(?: rest)?", re.I)
+
+
+def _nurse_directions(payload: dict) -> dict[str, set]:
+    """{nurse: {"up", "down"}} - which directions that nurse's numbers move in any listed option."""
+    out: dict[str, set] = {}
+    for opt in payload.get("options", []):
+        for nd in opt.get("nurses", []):
+            dirs = out.setdefault(nd["nurse"], set())
+            for m in METRICS:
+                a, b = nd["after"].get(m, 0), nd["before"].get(m, 0)
+                dirs.update({"up"} if a > b else {"down"} if a < b else set())
+            delta = (nd.get("strain_after") or 0) - (nd.get("strain_before") or 0)
+            dirs.update({"up"} if delta > 0 else {"down"} if delta < 0 else set())
+    return out
+
+
+def nurse_direction_errors(text, payload: dict) -> list[str]:
+    """Heuristic: a sentence about exactly one nurse whose nearest direction word contradicts that
+    nurse's numbers (e.g. "relieves Nurse_12" when every number for Nurse_12 goes up).
+
+    Only unambiguous contradictions are flagged: an 'up' word is accepted if anything for that
+    nurse goes up, a 'down' word if anything goes down."""
+    if not isinstance(text, str):
+        return []
+    try:
+        dirs = _nurse_directions(payload)
+    except (KeyError, TypeError, AttributeError):
+        return []
+    out: list[str] = []
+    start = 0
+    for end in [m.end() for m in _SENT.finditer(text)] + [len(text)]:
+        sent, start = _QR_PHRASE.sub(" ", text[start:end]), end
+        mentions = list(_NURSE_MENTION.finditer(sent))
+        names = {canon_nurse(m.group(0)) for m in mentions}
+        if len(names) != 1:
+            continue
+        nurse = names.pop()
+        if nurse not in dirs or not dirs[nurse]:
+            continue
+        pos = mentions[0].start()
+        words = [(abs(w.start() - pos), "up", w.group(0)) for w in _UP_WORD.finditer(sent)]
+        words += [(abs(w.start() - pos), "down", w.group(0)) for w in _DOWN_WORD.finditer(sent)]
+        if not words:
+            continue
+        _, way, word = min(words)
+        if way not in dirs[nurse]:
+            out.append(f"{nurse}: '{word}'")
+    return out
+
+
 def canon_nurse(value):
     """'Nurse 10' / 'nurse_10' / 'Nurse_010' -> 'Nurse_10'; anything else is returned unchanged."""
     m = _NURSE_REF.match(value) if isinstance(value, str) else None
@@ -135,6 +190,7 @@ def _allowed_numbers(payload: dict) -> set:
         for nd in opt["nurses"]:
             add(nd.get("strain_before"))
             add(nd.get("strain_after"))
+            add(nd.get("load_change"))
             for side in ("before", "after"):
                 for v in nd[side].values():
                     add(v)
@@ -199,3 +255,24 @@ def check(expl: dict, payload: dict) -> dict:
         "ground_truth": truth,
         "verified": false == 0 and not unsupported and rec_ok and tradeoff_ok and not dir_err,
     }
+
+
+def check_explanation(expl, payload: dict) -> dict:
+    """Fact check for 'rule ranks, GenAI explains': numbers, claims and direction only.
+
+    The choice itself is never the model's, so there is no recommendation check. status is
+    'verified', 'mismatch', or 'unavailable' (no model output). Never raises."""
+    if not isinstance(expl, dict):
+        return {"claims_total": 0, "claims_false": 0, "unsupported_numbers": [], "direction_errors": [],
+                "nurse_direction_errors": [], "no_claims": True, "verified": False, "status": "unavailable"}
+    try:
+        r = check_text(expl.get("text"), expl.get("claims"), payload)
+        r["nurse_direction_errors"] = nurse_direction_errors(expl.get("text"), payload)
+    except Exception:  # junk model output must never break the endpoint
+        r = {"claims_total": 0, "claims_false": 1, "unsupported_numbers": [], "direction_errors": [],
+             "nurse_direction_errors": []}
+    r["no_claims"] = r["claims_total"] == 0
+    r["verified"] = (r["claims_false"] == 0 and not r["unsupported_numbers"]
+                     and not r["direction_errors"] and not r["nurse_direction_errors"])
+    r["status"] = "verified" if r["verified"] else "mismatch"
+    return r

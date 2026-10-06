@@ -18,8 +18,8 @@ from pydantic import BaseModel, Field
 from llm.decide import build_decision_payload, decide, decision_candidates
 from llm.plain import plainify, replace_option_ids, shift_words
 from llm.policy_translate import translate_policy
-from llm.prompt import build_payload
-from llm.service import explain
+from llm.prompt import build_explain_payload
+from llm.service import explain_decision
 from sim.compare import (card_lines, difference_text, pick_summary, plain_change, plain_words, rest_effect, rest_lines,
                          ward_context, who_words)
 from sim.engine import Scenario, run_scenario
@@ -33,6 +33,7 @@ APP_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = APP_DIR.parent / "results"
 AUDIT_PATH = Path(os.environ.get("ROSTER_AUDIT_PATH", APP_DIR / "data" / "audit.jsonl"))
 Mode = Literal["baseline", "strain", "ai"]
+APP_MODES = {"rule_explains": "strain", "genai_chooser": "ai"}  # policy.json "mode" -> default UI mode
 Reason = Literal["local_knowledge", "preference", "skill_mix", "other"]
 
 
@@ -105,9 +106,9 @@ RESULT_METRICS = (("QR_total", "Quick returns per ward (8 weeks)", False),
                   ("SN_total", "Last-minute call-ins", True),
                   ("changes_per_repair", "Shifts changed per sick call", True))
 
-def _read_rows(name: str, policy: str) -> list[dict]:
+def _read_rows(name: str, value: str, col: str = "policy") -> list[dict]:
     with (RESULTS_DIR / name).open(newline="") as fh:
-        return [r for r in csv.DictReader(fh) if r.get("policy") == policy]
+        return [r for r in csv.DictReader(fh) if r.get(col) == value]
 
 def _per_seed(rows: list[dict]) -> dict[int, dict]:
     """Mean RESULT_METRICS per seed over rows whose metrics are all finite (others are skipped)."""
@@ -133,33 +134,56 @@ def _finite_mean(rows: list[dict], key: str) -> float | None:
             vals.append(v)
     return sum(vals) / len(vals) if vals else None
 
-def load_results() -> dict | None:
-    """GenAI (e5 'ai') vs today's software (e1 'baseline', same seeds) per ward; None if unusable."""
+def _explanation_reliability(model: str | None) -> dict | None:
+    """Arm B explanation quality for the app's model from results/e6_explanations_summary.csv."""
     try:
-        ai_rows = _read_rows("e5_runs.csv", "ai")
-        ai, base = _per_seed(ai_rows), _per_seed(_read_rows("e1_runs.csv", "baseline"))
-        seeds = sorted(set(ai) & set(base))
+        with (RESULTS_DIR / "e6_explanations_summary.csv").open(newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    except (OSError, csv.Error):
+        return None
+    row = next((r for r in rows if r.get("model") == model), rows[0] if rows else None)
+    if row is None:
+        return None
+    out = {"model": row.get("model"), "n_decisions": None}
+    for k in ("valid_output_rate", "fact_check_pass_rate", "direction_error_rate", "mean_latency_s", "n_decisions"):
+        try:
+            v = float(row[k])
+            out[k] = v if math.isfinite(v) else None
+        except (KeyError, ValueError, TypeError):
+            out[k] = None
+    return out
+
+def load_results() -> dict | None:
+    """E6 arms per ward: A (ORTEC-like), B (rule-ranked, main) and C (GenAI-chooser, experimental).
+
+    Reads results/e6_runs.csv; None if unusable. 'wins' counts wards where B beats A."""
+    try:
+        base = _per_seed(_read_rows("e6_runs.csv", "A", "arm"))
+        ours = _per_seed(_read_rows("e6_runs.csv", "B", "arm"))
+        exp = _per_seed(_read_rows("e6_runs.csv", "C", "arm"))
+        seeds = sorted(set(ours) & set(base))
         if not seeds:
             return None
+        side = lambda xs: {"mean": sum(xs) / len(xs), "min": min(xs), "max": max(xs)}  # noqa: E731
+        exp_seeds = [sd for sd in seeds if sd in exp]
         metrics = []
         for key, label, cost in RESULT_METRICS:
-            b, a = [base[sd][key] for sd in seeds], [ai[sd][key] for sd in seeds]
-            side = lambda xs: {"mean": sum(xs) / len(xs), "min": min(xs), "max": max(xs)}  # noqa: E731
-            sb, sa = side(b), side(a)
-            metrics.append({"key": key, "label": label, "cost": cost, "baseline": sb, "ai": sa,
-                            "change_pct": 100 * (sa["mean"] - sb["mean"]) / sb["mean"] if sb["mean"] > 0 else None,
-                            "wins": sum(1 for x, y in zip(a, b) if x < y),
-                            "ties": sum(1 for x, y in zip(a, b) if x == y)})
+            b, o = [base[sd][key] for sd in seeds], [ours[sd][key] for sd in seeds]
+            sb, so = side(b), side(o)
+            e = [exp[sd][key] for sd in exp_seeds]
+            metrics.append({"key": key, "label": label, "cost": cost, "baseline": sb, "ours": so,
+                            "exp": side(e) if e else None,
+                            "change_pct": 100 * (so["mean"] - sb["mean"]) / sb["mean"] if sb["mean"] > 0 else None,
+                            "wins": sum(1 for x, y in zip(o, b) if x < y),
+                            "ties": sum(1 for x, y in zip(o, b) if x == y),
+                            "exp_wins": sum(1 for sd in exp_seeds if exp[sd][key] < base[sd][key])})
         wards = [{"ward": i + 1, "seed": sd,
-                  "values": {k: {"baseline": base[sd][k], "ai": ai[sd][k]} for k, _, _ in RESULT_METRICS}}
+                  "values": {k: {"baseline": base[sd][k], "ours": ours[sd][k],
+                                 "exp": exp[sd][k] if sd in exp else None} for k, _, _ in RESULT_METRICS}}
                  for i, sd in enumerate(seeds)]
-        sec = _finite_mean(ai_rows, "latency_p50_ms")
-        model = next((r["model"] for r in ai_rows if r.get("model")), None)
-        return {"available": True, "n_wards": len(seeds), "metrics": metrics, "wards": wards, "model": model,
-                "reliability": {"verified_rate": _finite_mean(ai_rows, "verified_rate"),
-                                "fallback_rate": _finite_mean(ai_rows, "fallback_rate"),
-                                "latency_p50_ms": _finite_mean(ai_rows, "latency_p50_ms"),
-                                "seconds_per_decision": None if sec is None else sec / 1000}}
+        model = load_json("policy.json").get("model")
+        return {"available": True, "n_wards": len(seeds), "n_exp_wards": len(exp_seeds), "metrics": metrics,
+                "wards": wards, "model": model, "explanations": _explanation_reliability(model)}
     except (OSError, ValueError, KeyError, TypeError, csv.Error):
         return None
 
@@ -194,6 +218,7 @@ class AppState:
         self.scored = []
         self.explanation = None
         self.decision = None
+        self.policy_text = None
         self.last_day = 0
         self.shadow = Scenario(seed)
         self.shadow_pending = None  # shadow event opened early (fair start), resolved by the next sync
@@ -257,7 +282,7 @@ class TranslateIn(BaseModel):
 
 class AutoplayIn(BaseModel):
     events: int = Field(ge=1, le=30)
-    mode: Mode = "ai"
+    mode: Mode = "strain"
 
 
 class FastForwardIn(BaseModel):
@@ -336,6 +361,8 @@ def _state_json(event: dict | None = None) -> dict:
     sb_ortec = plan_scoreboard(STATE.shadow.roster, STATE.shadow.ward, policy["weights"])
     return {
         "seed": sc.seed,
+        "app_mode": policy.get("mode", "rule_explains"),
+        "default_mode": APP_MODES.get(policy.get("mode", "rule_explains"), "strain"),
         "days": ward.days,
         "nurses": [{"id": n.id, "fte": n.fte, "senior": n.senior, "night_ok": n.night_ok}
                    for n in ward.nurses],
@@ -525,9 +552,11 @@ def explain_current() -> dict:
         _guard_auto()
         _require_event()
         ctx = STATE.ctx
-        payload = build_payload(ctx, STATE.scored, STATE.policy)
-        model, timeout = STATE.policy.get("model", "qwen3:4b"), STATE.policy.get("ui_timeout_s", 20)
-    result = explain(payload, model, timeout)
+        if len(STATE.scored) < 1:
+            raise HTTPException(status_code=409, detail="No options to explain")
+        payload = build_explain_payload(ctx, STATE.scored, STATE.policy, STATE.policy_text)
+        model, timeout = STATE.policy.get("model", "qwen3:8b"), STATE.policy.get("ui_timeout_s", 30)
+    result = explain_decision(payload, model, timeout)  # explains the rule's choice; never changes it
     with STATE_LOCK:
         if STATE.ctx is ctx:
             STATE.explanation = result
@@ -597,6 +626,16 @@ def _apply_locked(body: ApplyIn) -> dict:
         entry.update({"ai_choice": ai_choice, "formula_top": formula_top,
                       "ai_agrees": (ai_choice == formula_top) if ai_choice else None,
                       "ai_verified": dec["check"]["verified"] if ai_choice else None})
+    if body.mode == "strain":
+        entry.update({
+            "ranking": [so.option.id for so in rank_options(STATE.scored, "strain")[:5]],
+            "ortec_choice": rank_options(STATE.scored, "baseline")[0].option.id,
+            "accepted_top": rank == 1,
+            "explanation_status": expl["check"]["status"] if expl else "not ready",
+            "explanation_text": expl["display_text"] if expl else None,
+            "explanation_error": expl["error"] if expl else None,
+            "policy_text": STATE.policy_text,
+        })
     _append_audit(entry)
     _clear_event()
     return {"state": _state_json()}
@@ -623,6 +662,8 @@ def put_policy(body: PolicyIn) -> dict:
         _guard_auto()
         STATE.policy = {**STATE.policy, "weights": body.weights.model_dump(),
                         "forward_days": body.forward_days, "squared": body.squared}
+        if body.policy_text:
+            STATE.policy_text = body.policy_text  # the explanation cites the approved policy
         _append_audit({"mode": "policy", "source": body.source, "policy_text": body.policy_text,
                        "weights": STATE.policy["weights"], "forward_days": body.forward_days,
                        "squared": body.squared})
