@@ -1,0 +1,15 @@
+{
+  "weights": {
+    "QR": 3.0,
+    "N": 1.0,
+    "LR": 2.0,
+    "OT": 0.5,
+    "SN": 1.5
+  },
+  "back_days": 28,
+  "forward_days": 28,
+  "squared": true,
+  "model": "qwen3:8b",
+  "ui_timeout_s": 20,
+  "eval_timeout_s": 60
+}

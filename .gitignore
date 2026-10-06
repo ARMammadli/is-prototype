@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Local tool state (not project content)
+.claude/settings.local.json
+.superpowers/
+
+# Runtime data written by the demo app
+prototype/app/data/audit.jsonl

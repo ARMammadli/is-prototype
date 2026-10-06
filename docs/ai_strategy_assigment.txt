@@ -1,0 +1,30 @@
+Teams of four students complete one integrated project throughout the course. The session labs are project development milestones and are not graded separately each week.
+
+Choose One Track
+
+Track A - Transform an existing organization. Select a real workflow, customer journey, product, service, or business process and redesign it using an appropriate emerging technology.
+Track B - Build a technology-enabled venture. Develop a product, service, or business model whose value proposition depends on one or more emerging technologies.
+Required Project Components
+
+Problem and opportunity: demonstrate that the problem matters and identify who benefits.
+Business model: explain how the proposal changes value creation, delivery, and capture.
+Working prototype: build a tangible proof-of-concept, workflow, or agent where feasible.
+Economics: estimate relevant human and AI costs, scalability, pricing/revenue logic, and expected benefits.
+Competitive and ecosystem analysis: identify dependencies, complementors, platform positions, and sources of defensibility.
+Evaluation: test the prototype, simulation, or core assumptions on relevant tasks or users and compare against an appropriate baseline. Evidence can include accuracy, time, cost, usefulness, user response, or other relevant outcomes.
+Governance and failure analysis: document important errors, limitations, privacy/security issues, human oversight needs, and responsible use considerations.
+Future-market test: reconsider the strategy under a scenario in which customers, suppliers, platforms, or competitors also use capable AI agents.
+Final recommendation: explain what the team would implement, change, scale, stop, or test next.
+Project Deliverables
+
+Project proposal / problem definition after Session 3 (working milestone; not separately graded): problem, organization/venture, proposed AI role, value proposition, and initial success metric. Due September 13 at 23:59.
+Prototype and evaluation evidence developed cumulatively during Sessions 3-8. Teams should bring the evolving project to each session; these milestones receive brief in-class feedback rather than weekly grades.
+Final strategy deck: maximum 15 slides, plus appendix, integrating the problem, business model, prototype/workflow, economics, platform/ecosystem analysis, evaluation evidence, risks, agentic future test, and final recommendation. Due October 7 at 23:59.
+Mandatory Demo Day on October 8, 16:00-18:45: concise executive-style pitch plus live prototype/demo. All teams must participate.
+You can find the grading rubricsDownload grading rubrics here. Grading is based solely on the final strategy deck. The Demo Day is not graded.
+
+Please submit the final strategy deck plus appendix and the prototype/workflow here.
+
+Technical expectations. This is an Information Strategy course, not a software development course. Students are expected to learn enough about the tools they choose to test their strategic idea, using online resources, self-study, no-code or low-code tools, or expertise within the team. Technical sophistication is not graded in itself. Teams should develop a working prototype where feasible. When implementation is technically difficult or inappropriate, a simulation or mock-up is acceptable if it clearly demonstrates the proposed workflow and supports testing of the main assumptions. Assessment focuses on strategic reasoning, design choices, use of course concepts, evidence, critical evaluation, and integration.
+
+Below are the two example submissions from previous year. These only serve as reference. There has been considerable changes this year in terms of assignment requirements and submission formats.

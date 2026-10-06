@@ -1,0 +1,41 @@
+{
+  "n_nurses": 70,
+  "fte_values": [
+    1.0,
+    0.89,
+    0.78,
+    0.67
+  ],
+  "fte_probs": [
+    0.3,
+    0.3,
+    0.25,
+    0.15
+  ],
+  "senior_frac": 0.25,
+  "night_exempt_frac": 0.15,
+  "days": 56,
+  "demand": {
+    "D": 11,
+    "E": 10,
+    "N": 6
+  },
+  "leave_frac": 0.12,
+  "leave_block_days": 7,
+  "repair_availability_p": 0.2,
+  "absence_rate": 0.0533,
+  "spell_lengths": [
+    1,
+    3,
+    4,
+    5
+  ],
+  "spell_probs": [
+    0.75,
+    0.1,
+    0.08,
+    0.07
+  ],
+  "short_notice_frac": 0.7,
+  "base_qr_pref": 0.14
+}

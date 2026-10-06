@@ -1,0 +1,4 @@
+model,n,n_llm,json_valid_rate,claim_accuracy,pct_flagged,pct_direction_error,recommendation_agreement,tradeoff_correct,latency_p50_ms,latency_p95_ms,fallback_rate
+qwen3:4b,150,150,1.0,0.9990680335507922,0.02666666666666667,0.43333333333333335,1.0,1.0,6799.0,12843.3,0.0
+qwen3:4b [differ],75,75,1.0,1.0,0.02666666666666667,0.16,1.0,1.0,8985.0,16015.299999999992,0.0
+qwen3:4b [same],75,75,1.0,0.996996996996997,0.02666666666666667,0.7066666666666667,1.0,1.0,4599.0,10430.4,0.0

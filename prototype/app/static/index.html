@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roster Repair</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/chart.umd.min.js"></script>
+</head>
+<body class="presenter">
+<header class="bar">
+  <h1><span class="logo x-presenter">🩺</span>Roster Repair <span class="sub x-expert">hospital ward · synthetic data</span><span class="tagline x-presenter">A nurse calls in sick — who should fill the gap?</span></h1>
+  <span id="setup" class="setup x-presenter">
+    <details class="setup-box"><summary>Setup ▸</summary>
+      <div class="setup-body">
+        <label>Ward <select id="ward-sel" aria-label="Ward">
+          <option value="0">Ward 1</option><option value="1">Ward 2</option><option value="2">Ward 3</option>
+          <option value="3">Ward 4</option><option value="4">Ward 5</option></select></label>
+        <label>Start at week <select id="start-week" aria-label="Start at week">
+          <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></label>
+      </div>
+    </details>
+    <button id="btn-start" class="primary">▶ Start</button>
+  </span>
+  <span class="x-expert"><label>Seed <input id="seed" type="number" value="0" min="0"></label>
+    <button id="btn-new">New scenario</button></span>
+  <div class="toggle x-expert">
+    <button class="mode" data-mode="baseline">Baseline: Today's software (ORTEC-style)</button>
+    <button class="mode active" data-mode="ai">Our solution: With GenAI</button>
+    <button class="mode" data-mode="strain">Hospital rule + GenAI explanation</button>
+  </div>
+  <span id="remaining" class="muted x-expert"></span>
+  <span class="ff x-expert">
+    <label>Jump to week <select id="ff-week">
+      <option value="8">2</option><option value="15">3</option><option value="22">4</option>
+      <option value="29">5</option><option value="36">6</option><option value="43">7</option><option value="50">8</option>
+    </select></label>
+    <button id="btn-ff">Fast-forward</button>
+    <button id="btn-auto">Auto ×10</button>
+  </span>
+  <button id="btn-view" class="view-toggle" title="Switch between the simple presenter view and the full detailed view">Show details</button>
+</header>
+<nav id="tabs" class="tabs x-presenter" role="tablist">
+  <button id="tab-one" role="tab" data-page="one" class="tab active">① One sick call</button>
+  <button id="tab-results" role="tab" data-page="results" class="tab">② Results across all wards</button>
+</nav>
+<main id="page-one">
+  <section id="preview-card" class="card a-preview x-expert">
+    <h2>If this ward ran all 8 weeks</h2><div id="preview"></div></section>
+  <div class="stack a-left">
+    <section id="sick-card" class="card"><h2><span class="step x-presenter"><span class="num">1</span>A nurse calls in sick</span><span class="x-expert">Sick call</span></h2>
+      <div id="event" class="big-line"></div>
+      <button id="btn-next" class="primary hidden">Next sick call ▶</button>
+      <div id="decide-card" class="hidden">
+        <h3 class="x-expert">GenAI decision <span id="decide-meta"></span></h3>
+        <div id="decide-head"></div>
+        <p id="decide-text"></p>
+        <details class="why x-expert"><summary>why?</summary><ul id="decide-issues"></ul></details>
+        <div id="decide-formula" class="x-expert"></div>
+      </div>
+    </section>
+    <section id="explain-card" class="card hidden x-expert">
+      <h2>Why the top option <span id="explain-meta"></span></h2>
+      <p id="explain-text"></p>
+      <ul id="explain-claims"></ul>
+    </section>
+  </div>
+  <div class="stack a-options">
+    <section id="compare-card" class="card hidden"><h2 id="compare-title">What happens</h2>
+      <div id="compare"></div>
+      <div id="plain" class="plain x-expert"><b>In plain words</b><p id="plain-text"></p></div>
+      <div id="genai-explains" class="explains x-presenter"></div>
+      <p id="rule-line" class="rule-line x-expert"></p>
+      <div class="x-presenter apply-row">
+        <button id="btn-apply-main" class="primary big" disabled>Apply GenAI's choice</button>
+        <span id="apply-status" class="muted"></span>
+        <span class="approve-note">The ward planner approves every change.</span>
+      </div>
+    </section>
+    <section class="card opts-card x-expert"><h2>Repair options</h2><div id="options"></div>
+      <p id="legend" class="muted"></p></section>
+  </div>
+  <section class="card a-auto">
+    <h2 class="step x-presenter auto-step"><span class="num">3</span>Let GenAI handle the next sick calls on its own</h2>
+    <span id="auto-ctl" class="auto-ctl">
+      <button id="btn-autoplay" class="primary big">Let GenAI handle the next</button>
+      <select id="auto-n" aria-label="Number of sick calls"><option>3</option><option selected>5</option><option>10</option></select>
+      <span id="auto-ctl-tail">sick calls</span>
+    </span>
+    <div id="auto-card" class="hidden">
+      <h3><span id="auto-title">GenAI autoplay</span> <button id="btn-auto-stop" class="hidden">Stop</button></h3>
+      <div id="auto-head"></div>
+      <progress id="auto-bar" max="1" value="0"></progress>
+      <ul id="auto-list"></ul>
+    </div>
+  </section>
+  <section class="card a-score" id="score-card"><h2 id="score-title">This ward since GenAI took over</h2>
+    <div id="scoreboard"></div>
+    <p id="tradeoff" class="tradeoff hidden"></p>
+    <p id="score-note" class="score-note x-expert"></p>
+    <div class="chart-wrap x-expert" id="chart-wrap"><canvas id="score-chart"></canvas></div>
+    <p class="muted x-expert">Both columns are the same ward after the same sick calls; only the repair choices differ. Lower is better.</p>
+  </section>
+  <section class="card a-roster x-expert"><h2>Roster</h2><div id="grid-wrap"><table id="grid"></table></div>
+    <p class="muted">D = day shift, E = evening shift, N = night shift, L = leave, X = absent (sick call). ★ = senior nurse.</p></section>
+  <section class="card a-strain x-expert"><h2>Ward load score <span id="ward-kpis" class="muted"></span></h2>
+    <canvas id="strain-chart" height="220"></canvas></section>
+  <section id="policy-card" class="card a-policy hidden x-expert"><h2>Hospital policy (load weights)</h2><form id="policy-form"></form>
+    <div id="policy-nl">
+      <label for="policy-text"><b>Describe your fairness policy in words</b></label>
+      <textarea id="policy-text" rows="3" maxlength="1000" placeholder="Protect nurses from quick returns above all; nights matter less; avoid calling people at short notice."></textarea>
+      <div><button type="button" id="btn-translate">Translate with GenAI</button> <span id="translate-status" class="muted"></span></div>
+      <div id="translate-result"></div>
+    </div></section>
+  <section class="card a-audit x-expert"><h2>Audit log</h2><table id="audit"></table></section>
+</main>
+<main id="page-results" class="results x-presenter">
+  <section class="card res-card">
+    <h2 id="res-title">Results across all wards</h2>
+    <p id="res-hero" class="res-hero"></p>
+    <div id="res-table"></div>
+    <div id="res-chart-box" class="hidden">
+      <div class="chart-wrap res-chart"><canvas id="res-chart"></canvas></div>
+      <p id="res-cap" class="muted"></p>
+    </div>
+    <div id="res-rel" class="res-rel"></div>
+    <p id="res-foot" class="muted"></p>
+  </section>
+</main>
+<dialog id="override-dlg">
+  <form method="dialog">
+    <h3>Why not the top option?</h3>
+    <select id="override-reason">
+      <option value="local_knowledge">Local knowledge</option>
+      <option value="preference">Nurse preference</option>
+      <option value="skill_mix">Skill mix</option>
+      <option value="other">Other</option>
+    </select>
+    <menu><button value="cancel">Cancel</button><button value="ok" class="primary">Apply</button></menu>
+  </form>
+</dialog>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
