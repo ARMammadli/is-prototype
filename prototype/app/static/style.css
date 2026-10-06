@@ -139,6 +139,14 @@ body.presenter #decide-card { display:none !important; }
 body:not(.pg-results) #page-results { display:none; }
 body.presenter.pg-results #page-one { display:none; }
 body.pg-results #page-results { display:block; padding:14px 16px; max-width:1200px; }
+body:not(.pg-monthly) #page-monthly { display:none; }
+body.presenter.pg-monthly #page-one { display:none; }
+body.pg-monthly #page-monthly { display:block; padding:14px 16px; max-width:1200px; }
+.mr-ctl { display:flex; gap:10px; align-items:center; margin:8px 0 14px; flex-wrap:wrap; }
+.mr-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+@media (max-width: 900px) { .mr-grid { grid-template-columns:1fr; } }
+.mr-text { font-size:16px; line-height:1.5; } .mr-text ol { padding-left:20px; } .mr-text li { margin:6px 0; }
+.mr-who { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; font-weight:700; margin-top:10px; }
 .res-card { padding:18px 22px; }
 .res-card h2 { font-size:20px; margin:0 0 6px; }
 .res-hero { font-size:24px; font-weight:600; margin:6px 0 14px; color:var(--ok); }

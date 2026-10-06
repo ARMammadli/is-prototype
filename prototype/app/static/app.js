@@ -849,12 +849,14 @@ let resChart = null;
 function pageFromUrl() {
   const q = new URLSearchParams(location.search).get("page");
   if (q === "results" || location.hash === "#results") return "results";
+  if (q === "monthly" || location.hash === "#monthly") return "monthly";
   if (q === "one" || location.hash === "#one") return "one";
-  try { return localStorage.getItem("roster-page") === "results" ? "results" : "one"; } catch (e) { return "one"; }
+  try { const p = localStorage.getItem("roster-page"); return p === "results" || p === "monthly" ? p : "one"; } catch (e) { return "one"; }
 }
 
 function setPage(p) {
   document.body.classList.toggle("pg-results", p === "results");
+  document.body.classList.toggle("pg-monthly", p === "monthly");
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.page === p));
   try { localStorage.setItem("roster-page", p); } catch (e) { /* storage unavailable */ }
   if (p === "results") guarded(loadResults);
@@ -923,6 +925,58 @@ function renderResultsChart(r) {
     plugins: { legend: { position: "bottom" }, title: { display: true, text: "Change vs today's software (%)" },
       tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y}%` } } },
     scales: { y: { ticks: { callback: (v) => `${v}%` }, suggestedMax: 5 } } } });
+}
+
+// ---- Monthly report: rules compute the facts, GenAI writes the text, the checker verifies it ---------
+const MR_ROWS = [["Quick returns", "quick_returns"], ["Nurses with 3+ quick returns", "nurses_3plus_quick_returns"],
+  ["Most quick returns for one nurse", "max_quick_returns_one_nurse"], ["Unfilled shifts", "unfilled_shifts"],
+  ["Last-minute call-ins (the cost)", "last_minute_call_ins"], ["Shift changes per sick call (the cost)", "shift_changes_per_sick_call"],
+  ["Nurses whose shifts changed", "nurses_whose_shifts_changed"]];
+
+function renderMonthlyFacts(f) {
+  const r = f.hospital_rule, o = f.todays_software;
+  const rows = MR_ROWS.map(([l, k]) => { const [cx, cy] = cmpClass(o[k], r[k]);
+    return `<tr><td>${l}</td><td class="num ${cx}">${o[k]}</td><td class="num ${cy}">${r[k]}</td></tr>`; }).join("");
+  const nurses = (xs, k) => xs.length ? xs.map((x) => `${esc(niceNurse(x.nurse))} (${x[k]})`).join(", ") : "none";
+  const p = f.planner, g = f.genai_explanations;
+  const planner = p ? `${p.decisions_by_planner} decisions in the live demo: ${p.accepted_rule_choice} accepted, ${p.overridden} overridden` +
+    (Object.keys(p.override_reasons).length ? ` (${Object.entries(p.override_reasons).map(([k, v]) => `${esc(k)}: ${v}`).join(", ")})` : "") : "—";
+  return `<p>Ward ${f.ward} · days ${esc(f.days)} · ${f.sick_calls} sick calls · same sick calls for both</p>` +
+    `<table class="cmp"><tr><th></th><th>Today's software</th><th>Hospital rule</th></tr>${rows}</table>` +
+    `<ul><li>Quick returns already in the original roster: <b>${f.quick_returns_in_original_roster}</b></li>` +
+    `<li>Most last-minute call-ins: ${nurses(f.most_last_minute_call_ins, "last_minute_call_ins")}</li>` +
+    `<li>Most quick returns: ${nurses(f.most_quick_returns, "quick_returns")}</li>` +
+    `<li>Planner: ${planner}</li>` +
+    (g ? `<li>GenAI explanations (measured run): ${g.passed_fact_check} of ${g.explained} passed the fact check</li>` : "") + "</ul>";
+}
+
+async function writeMonthly() {
+  const month = Number($("#mr-month").value) || 1;
+  $("#btn-monthly").disabled = true;
+  $("#mr-status").innerHTML = '<span class="spinner"></span>Computing facts and asking GenAI to write…';
+  $("#mr-text").innerHTML = ""; $("#mr-facts").innerHTML = "";
+  try {
+    const r = await api("/api/monthly-report", { method: "POST", body: JSON.stringify({ month }) });
+    $("#mr-facts").innerHTML = renderMonthlyFacts(r.facts);
+    if (!r.report) {
+      $("#mr-text").innerHTML = `<p class="muted">GenAI could not write the report (${esc(r.error || "unavailable")}). The facts on the left are complete and computed without GenAI.</p>`;
+    } else {
+      const c = r.check, issues = [];
+      if (c.unsupported_numbers.length) issues.push(`Numbers not in the facts: ${c.unsupported_numbers.join(", ")}`);
+      if (c.direction_errors.length) issues.push(`Wording says the opposite of the numbers: ${c.direction_errors.join(", ")}`);
+      if (c.nurse_errors.length) issues.push(`Wrong number for a nurse: ${c.nurse_errors.join("; ")}`);
+      $("#mr-text").innerHTML = `<p>${esc(niceNurse(r.report.summary))}</p><b>For the review meeting</b><ol>` +
+        r.report.discussion_points.map((x) => `<li>${esc(niceNurse(x))}</li>`).join("") + "</ol>" + (c.verified ? '<span class="badge ok">✓ Every number checked against the facts</span>'
+          : '<span class="badge bad">⚠️ Some numbers or wording do not match the facts — check before sharing</span>') +
+        (issues.length ? `<ul>${issues.map((i) => `<li class="warn">${esc(niceNurse(i))}</li>`).join("")}</ul>` : "");
+    }
+    $("#mr-status").innerHTML = `<span class="src">${esc(r.source)} · ${Math.round(r.latency_ms / 100) / 10} s</span>`;
+  } catch (e) {
+    $("#mr-status").textContent = `Report failed: ${e.message}`;
+  } finally {
+    $("#btn-monthly").disabled = false;
+    await loadAudit();
+  }
 }
 
 // ---- GenAI autoplay --------------------------------------------------------------------------
@@ -1021,7 +1075,9 @@ async function stopAutoplay() {
 
 async function loadAudit() {
   const rows = (await api("/api/audit")).entries.slice(-15).reverse();
-  const line = (r) => r.mode === "policy"
+  const line = (r) => r.mode === "monthly_report"
+    ? `<tr><td>${esc(r.ts.slice(11, 19))}</td><td>—</td><td>Monthly report</td><td>month ${r.month}</td><td></td><td></td><td>${esc(r.source ?? "")} · ${esc(r.report_status ?? "")}</td></tr>`
+    : r.mode === "policy"
     ? `<tr><td>${esc(r.ts.slice(11, 19))}</td><td>—</td><td>Policy</td><td>weights updated (${esc(r.source ?? "manual")})</td><td></td><td></td><td>${esc(r.policy_text ?? "")}</td></tr>`
     : `<tr><td>${esc(r.ts.slice(11, 19))}</td><td>${r.event_id}</td><td>${esc(MODE_LABEL[r.mode] ?? r.mode)}${r.fallback ? " (fallback)" : ""}</td>` +
       `<td>${esc(r.option_id ?? "unfilled")}</td><td>${esc(r.top_option ?? "")}</td><td>${esc(r.override_reason ?? "")}</td>` +
@@ -1034,6 +1090,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-start").addEventListener("click", () => guarded(startPresenter));
   $("#btn-apply-main").addEventListener("click", () => guarded(applyMain));
   $("#btn-override-main").addEventListener("click", () => guarded(overrideMain));
+  $("#btn-monthly").addEventListener("click", () => guarded(writeMonthly));
   $("#btn-view").addEventListener("click", () => guarded(() => setView(isPresenter() ? "expert" : "presenter")));
   $("#btn-new").addEventListener("click", () => guarded(newScenario));
   $("#btn-next").addEventListener("click", () => guarded(nextEvent));

@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from llm.decide import build_decision_payload, decide, decision_candidates
+from llm.monthly import compute_month_facts, write_report
 from llm.plain import plainify, replace_option_ids, shift_words
 from llm.policy_translate import translate_policy
 from llm.prompt import build_explain_payload
@@ -274,6 +275,10 @@ class PolicyIn(BaseModel):
     squared: bool = True
     source: Literal["manual", "genai"] = "manual"
     policy_text: str | None = Field(default=None, max_length=1000)
+
+
+class MonthlyIn(BaseModel):
+    month: int = Field(ge=1, le=2)
 
 
 class TranslateIn(BaseModel):
@@ -809,6 +814,28 @@ def stop_autoplay() -> dict:
         if AUTO["running"]:
             AUTO["cancel"] = True
         return {"stopping": bool(AUTO["running"])}
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    try:
+        return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+@app.post("/api/monthly-report")
+def monthly_report(body: MonthlyIn) -> dict:
+    """Monthly scheduler-manager review: rules compute the facts, GenAI writes the text, the text is checked."""
+    with STATE_LOCK:
+        seed, policy = STATE.scenario.seed, dict(STATE.policy)
+    model = policy.get("model", "qwen3:8b")
+    expl = _read_jsonl(RESULTS_DIR / f"e6_explanations_{model.replace(':', '-')}.jsonl")
+    facts = compute_month_facts(seed, body.month, policy, audit_entries=_read_jsonl(AUDIT_PATH),
+                                explanation_rows=expl)
+    result = write_report(facts, model, max(60, policy.get("ui_timeout_s", 30)))
+    _append_audit({"mode": "monthly_report", "month": body.month, "source": result["source"],
+                   "report_status": result["check"]["status"], "error": result["error"]})
+    return result
 
 
 @app.get("/api/audit")

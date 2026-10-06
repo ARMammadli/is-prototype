@@ -43,6 +43,7 @@
 <nav id="tabs" class="tabs x-presenter" role="tablist">
   <button id="tab-one" role="tab" data-page="one" class="tab active">① One sick call</button>
   <button id="tab-results" role="tab" data-page="results" class="tab">② Results across all wards</button>
+  <button id="tab-monthly" role="tab" data-page="monthly" class="tab">③ Monthly report</button>
 </nav>
 <main id="page-one">
   <section id="preview-card" class="card a-preview x-expert">
@@ -126,6 +127,21 @@
     </div>
     <div id="res-rel" class="res-rel"></div>
     <p id="res-foot" class="muted"></p>
+  </section>
+</main>
+<main id="page-monthly" class="results x-presenter">
+  <section class="card res-card">
+    <h2>Monthly roster review — scheduler and manager</h2>
+    <p class="muted">The roster system computes every number with fixed rules. GenAI only writes the text, and every number in the text is checked against the facts.</p>
+    <div class="mr-ctl">
+      <label>Month <select id="mr-month"><option value="1">Month 1 (days 1–28)</option><option value="2">Month 2 (days 29–56)</option></select></label>
+      <button id="btn-monthly" class="primary">Write report with GenAI</button>
+      <span id="mr-status" class="muted"></span>
+    </div>
+    <div class="mr-grid">
+      <div><div class="mr-who">Facts (computed by rules)</div><div id="mr-facts"></div></div>
+      <div><div class="mr-who">Report (written by GenAI, checked)</div><div id="mr-text" class="mr-text"></div></div>
+    </div>
   </section>
 </main>
 <dialog id="override-dlg">
