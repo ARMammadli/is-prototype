@@ -1,0 +1,7 @@
+{"sample": 20, "rng_seed": 5,
+ "any_error": 10,
+ "factual_errors": 2,
+ "wording_errors": 8,
+ "moves_cases_actually_correct": 0,
+ "moves_cases_where_old_fact_label_may_have_contributed": 5,
+ "note": "Same 20 summaries. Factual: (0,27) 'with 1 last-minute call-in' when the count goes 1 to 2; (1,1) '1 hour' of call-ins (invented). Wording: 8 summaries say a nurse is 'moved' when the facts say the nurse is called in: (0,58) (1,50) (1,54) (3,48) (3,55) (4,13) (4,28) (4,77). None of the 8 is correct: each fact block's description line says 'call in'. The old label ('last-minute call-ins' for every change with <48 h notice, also for moved nurses) may explain 5 of them, but the text the planner sees is still wrong. The earlier figure '5 of 20 GenAI errors' wrongly removed those 5 and is withdrawn."}

@@ -1,0 +1,2 @@
+model,n_decisions,valid_output_rate,fact_check_pass_rate,direction_error_rate,comparison_error_rate,fact_check_pass_rate_v1,unsupported_number_rate,false_claim_rate,mean_latency_s
+qwen3:8b,400,1.0,0.6625,0.0025,0.31,0.745,0.0125,0.025,11.330465

@@ -24,12 +24,12 @@ def test_pick_summary():
     s = pick_summary(so)
     assert s == {"id": "Option_2", "change_text": "Nurse_01: off → D; Nurse_02: off → D",
                  "description": "Call in Nurse 01 for the day shift",
-                 "involved": [{"nurse": "Nurse_01", "before": 2.0, "after": 5.0, "qr_change": 1},
-                              {"nurse": "Nurse_02", "before": 4.0, "after": 1.0, "qr_change": -1}],
+                 "involved": [{"nurse": "Nurse_01", "before": 2.0, "after": 5.0, "qr_change": 1, "counts": {"QR": 0}},
+                              {"nurse": "Nurse_02", "before": 4.0, "after": 1.0, "qr_change": -1, "counts": {"QR": 1}}],
                  "new_quick_returns": 0, "heaviest_before": 4.0, "heaviest_after": 5.0,
                  "people_disturbed": 2, "load_added": 0.0,
-                 "extra_work": {"nurse": "Nurse_01", "before": 2.0, "after": 5.0},
-                 "relief": {"nurse": "Nurse_02", "before": 4.0, "after": 1.0}}
+                 "extra_work": {"nurse": "Nurse_01", "before": 2.0, "after": 5.0, "counts": {"QR": 0}},
+                 "relief": {"nurse": "Nurse_02", "before": 4.0, "after": 1.0, "counts": {"QR": 1}}}
     neg = pick_summary(_so("Option_3", [_nd("Nurse_02", 2, 0, 6.0, 1.0)], -5.0))
     assert neg["new_quick_returns"] == -2
     assert neg["extra_work"] is None and neg["relief"]["nurse"] == "Nurse_02"
@@ -89,9 +89,9 @@ def test_who_words_sentence_and_fallbacks():
     ours = summ("Option_1", -1, None, {"nurse": "Nurse_59", "before": 18.5, "after": 10.0})
     ortec = summ("Option_2", 1, {"nurse": "Nurse_08", "before": 1.5, "after": 6.0}, None)
     ward = {"tired_at": 10.0, "median_at": 5.0}
-    assert who_words(ours, ortec, ward) == ("With GenAI, Nurse 59 (tiredness: high) is moved off a short rest; today's "
-                                            "software would make Nurse 08 (tiredness: low) come back after a short rest.")
-    assert "tiredness: low" in who_words(ours, ortec, {"tired_at": 20.0, "median_at": 20.0})
+    assert who_words(ours, ortec, ward) == ("With the hospital rule, Nurse 59 (recent load: high) is moved off a short rest; today's "
+                                            "software would make Nurse 08 (recent load: low) come back after a short rest.")
+    assert "recent load: low" in who_words(ours, ortec, {"tired_at": 20.0, "median_at": 20.0})
     assert "Option_" not in who_words(ours, summ("Option_3", 0, None, None))
     assert who_words(summ("Option_1", 0, None, None), ortec) is None
     assert "same fix" in who_words(ours, ours)
@@ -122,8 +122,8 @@ def test_card_lines_genai_relief_and_cost():
     ward = {"tired_at": 4.0, "median_at": 1.2}
     cl = card_lines(ours, ortec, ward, {"ours": ["everyone keeps 11 h+ rest ✓"], "ortec": ["Nurse 08 comes back after only 8.5 h rest ⚠️"]})
     assert cl["ortec"] == ["Call in Nurse 08 for the day shift",
-                           "Result: Nurse 08 (tiredness: medium) gets a short rest.", "Changes 1 person's shift."]
-    assert cl["ours"] == [ours["description"], "Result: Nurse 67 (tiredness: high) is moved off a short rest.",
+                           "Result: Nurse 08 (recent load: medium) gets a short rest.", "Changes 1 person's shift."]
+    assert cl["ours"] == [ours["description"], "Result: Nurse 67 (recent load: high) is moved off a short rest.",
                           "Cost: changes 2 people's shifts instead of 1."]
     assert cl["rest_lines"] == {"ours": ["everyone keeps 11 h+ rest ✓"], "ortec": ["Nurse 08 comes back after only 8.5 h rest ⚠️"]}
     assert not any("tiredness 4" in l or "tiredness 1" in l for l in cl["ours"] + cl["ortec"])  # words, not scores
@@ -135,7 +135,7 @@ def test_card_lines_same_size_no_cost_and_plain_relief():
     a = _pick("O1", "d1", [("Nurse_01", 2.0, 1.0, 0)])
     b = _pick("O2", "d2", [("Nurse_02", 2.0, 3.0, 0)])
     cl = card_lines(a, b, None)
-    assert cl["ours"][0] == "d1" and cl["ours"][1].startswith("Result: Nurse 01 (tiredness: low)")
+    assert cl["ours"][0] == "d1" and cl["ours"][1].startswith("Result: Nurse 01 (recent load: low)")
     assert len(cl["ours"]) == 2 and cl["ortec"][-1] == "Changes 1 person's shift."
     two = _pick("O3", "d3", [("Nurse_03", 1.0, 2.0, 0), ("Nurse_04", 1.0, 2.0, 0)])
     assert card_lines(a, two, None)["ortec"][-1] == "Changes 2 people's shifts."
@@ -187,23 +187,29 @@ def test_difference_text_rest_fixed_made_and_fallbacks():
     ours = _pick("O2", "Move Nurse 05; call in Nurse 36", [("Nurse_05", 2.0, 1.0, -1), ("Nurse_36", 0.5, 2.0, 0)])
     fx = {"ours": [{"nurse": "Nurse_05", "before": 8.0, "after": 16.5}, {"nurse": "Nurse_36", "before": None, "after": 24.0}],
           "ortec": [{"nurse": "Nurse_36", "before": None, "after": 24.0}]}
-    assert difference_text(ours, ortec, fx, ward) == ("Today's software leaves Nurse 05 (tiredness: medium) with only 8 h rest "
-                                                      "between two shifts; GenAI changes the plan so they get 16.5 h.")
+    assert difference_text(ours, ortec, fx, ward) == ("Today's software leaves Nurse 05 (recent load: medium) with only 8 h rest "
+                                                      "between two shifts; the hospital rule changes the plan so they get 16.5 h.")
     fx_made = {"ours": [], "ortec": [{"nurse": "Nurse_36", "before": 30.0, "after": 8.5}]}
-    assert difference_text(ours, ortec, fx_made, ward) == ("Today's software would bring Nurse 36 (tiredness: low) back after "
-                                                           "only 8.5 h rest; GenAI avoids that.")
+    assert difference_text(ours, ortec, fx_made, ward) == ("Today's software would bring Nurse 36 (recent load: low) back after "
+                                                           "only 8.5 h rest; the hospital rule avoids that.")
     fx_own = {"ours": [{"nurse": "Nurse_05", "before": None, "after": 8.0}], "ortec": []}
-    assert "Note: GenAI's fix brings Nurse 05" in difference_text(ours, ortec, fx_own, ward)
+    assert "Note: the hospital rule's fix brings Nurse 05" in difference_text(ours, ortec, fx_own, ward)
     assert difference_text(ours, ours, fx, ward) == "Both chose the same fix here."
     # Both picks give Nurse 36 a short rest: never claim "GenAI avoids that", only the honest note.
     both = {"ortec": [{"nurse": "Nurse_36", "before": 30.0, "after": 8.5}], "ours": [{"nurse": "Nurse_36", "before": 30.0, "after": 8.5}]}
     t = difference_text(ours, ortec, both, ward)
-    assert "avoids" not in t and t.startswith("Note: GenAI's fix brings Nurse 36")
+    assert "avoids" not in t and t.startswith("Note: the hospital rule's fix brings Nurse 36")
     # The worst case is named: the shortest rest wins.
     two = {"ours": [], "ortec": [{"nurse": "Nurse_36", "before": None, "after": 10.0}, {"nurse": "Nurse_05", "before": None, "after": 8.0}]}
     assert "Nurse 05" in difference_text(ours, ortec, two, ward) and "8 h" in difference_text(ours, ortec, two, ward)
     a = dict(ortec, extra_work={"nurse": "Nurse_36", "before": 0.5, "after": 2.0})
     b = dict(ours, extra_work={"nurse": "Nurse_05", "before": 4.5, "after": 6.0})
-    assert difference_text(b, a, {}, ward) == ("Today's software gives the extra work to Nurse 36 (tiredness: low); "
-                                               "GenAI gives it to Nurse 05 (tiredness: medium).")
+    assert difference_text(b, a, {}, ward) == ("Today's software gives the extra work to Nurse 36 (recent load: low); "
+                                               "the hospital rule gives it to Nurse 05 (recent load: medium).")
     assert difference_text(ours, ortec, {}, ward) is None
+
+
+def test_recent_load_shows_the_counts_behind_it():
+    from sim.compare import _who
+    assert _who("Nurse_67", 20.0, {"tired_at": 10.0, "median_at": 5.0}, {"QR": 3, "N": 4, "LR": 0, "OT": 0.0, "SN": 1}) == (
+        "Nurse 67 (recent load: high, 3 quick returns, 4 nights, 1 short-notice change in the past and next 28 days)")

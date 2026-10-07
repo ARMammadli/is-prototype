@@ -30,11 +30,6 @@ class EventRecord:
     offers: int
     baseline_top: str | None
     strain_top: str | None
-    ai_choice: str | None = None
-    ai_agrees: bool | None = None
-    ai_fallback: bool = False
-    ai_latency_ms: int | None = None
-    ai_verified: bool | None = None
 
 
 @dataclass
@@ -99,7 +94,7 @@ class Scenario:
 
 def run_scenario(seed: int, policy_name: str, policy: dict, acceptance: str = "today",
                  ward_cfg: dict | None = None, absence_rate: float | None = None,
-                 on_event=None, chooser=None) -> RunResult:
+                 on_event=None) -> RunResult:
     sc = Scenario(seed, ward_cfg, absence_rate)
     agent_rng = np.random.default_rng(seed + 10_000)
     records = []
@@ -107,18 +102,7 @@ def run_scenario(seed: int, policy_name: str, policy: dict, acceptance: str = "t
         scored = score_options(ctx, generate_candidates(ctx), policy)
         if on_event is not None:
             on_event(ctx, scored)
-        ai_info: dict = {}
-        ai_choice = None
-        if policy_name == "ai":
-            order = rank_options(scored, "strain")
-            if chooser is not None and scored:
-                ai_choice, ai_info = chooser(ctx, scored)
-                ai_info = ai_info or {}
-                pick = [so for so in order if so.option.id == ai_choice]
-                if pick:
-                    order = pick + [so for so in order if so is not pick[0]]
-        else:
-            order = rank_options(scored, policy_name)
+        order = rank_options(scored, policy_name)
         med = median(ward_strains(ctx, policy).values()) if acceptance == "picky" else 0.0
         chosen, offers = None, 0
         for so in order:
@@ -139,8 +123,5 @@ def run_scenario(seed: int, policy_name: str, policy: dict, acceptance: str = "t
             changes=chosen.option.changes if chosen else (), offers=offers,
             baseline_top=rank_options(scored, "baseline")[0].option.id if scored else None,
             strain_top=rank_options(scored, "strain")[0].option.id if scored else None,
-            ai_choice=ai_choice, ai_agrees=ai_info.get("agrees"),
-            ai_fallback=bool(ai_info.get("fallback", False)),
-            ai_latency_ms=ai_info.get("latency_ms"), ai_verified=ai_info.get("verified"),
         ))
     return RunResult(seed, policy_name, acceptance, sc.ward, sc.base, sc.roster, sc.blocked, records)

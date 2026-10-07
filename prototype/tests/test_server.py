@@ -36,13 +36,16 @@ def test_full_repair_flow_and_audit(client):
     assert base[0]["rank"] == 1 and "contract_h" in base[0]
     assert strain[0]["rank"] == 1 and "nurses" in strain[0]
     assert {o["id"] for o in base} <= {o["id"] for o in client.get("/api/options?mode=strain&limit=100").json()["options"]}
-    ex = client.post("/api/explain").json()
-    assert ex["source"] == "template" and ex["check"]["verified"]
+    ex = client.post("/api/explain").json()  # LLM down: no narrative, the rule's choice stands
+    assert ex["source"] == "unavailable" and ex["explanation"] is None and ex["display_text"] is None
+    assert ex["check"]["status"] == "unavailable" and ex["chosen_option"] == strain[0]["id"]
     assert ex["event_id"] == ev["event_id"]
     r = client.post("/api/apply", json={"event_id": ev["event_id"], "option_id": strain[0]["id"], "mode": "strain"})
     assert r.status_code == 200 and r.json()["state"]["event"] is None
-    entries = client.get("/api/audit").json()["entries"]
-    assert entries[-1]["option_id"] == strain[0]["id"] and entries[-1]["explanation_source"] == "template"
+    e = client.get("/api/audit").json()["entries"][-1]
+    assert e["option_id"] == strain[0]["id"] and e["explanation_source"] == "unavailable"
+    assert e["explanation_status"] == "unavailable" and "ConnectError" in e["explanation_error"]
+    assert e["ranking"][0] == strain[0]["id"] and e["accepted_top"] is True and e["ortec_choice"].startswith("Option_")
 
 
 def test_non_top_without_reason_is_rejected_then_accepted_with_reason(client):
@@ -120,79 +123,18 @@ def test_response_shapes(client):
     ev = _open_event(client)
     s = client.get("/api/state").json()
     assert set(s) == {"seed", "days", "nurses", "grid", "changed", "absent", "leave", "event",
-                      "remaining_events", "unfilled", "strain", "kpis", "preview", "headline", "scoreboard", "since_takeover", "autoplay_running"}
+                      "remaining_events", "unfilled", "strain", "kpis", "preview", "scoreboard", "since_takeover", "autoplay_running"}
     assert set(s["event"]) == {"event_id", "absent", "day", "shift", "notice_h", "unfilled"}
     assert set(s["kpis"]) == {"gini", "top10_qr_share", "max_qr"}
     base = client.get("/api/options?mode=baseline").json()["options"][0]
     assert set(base) == {"id", "rank", "kind", "change_text", "description", "nurse", "contract_h", "hours_period", "n_changes"}
     st = client.get("/api/options?mode=strain").json()["options"][0]
-    assert set(st) == {"id", "rank", "rank_baseline", "kind", "change_text", "description", "n_changes", "delta_strain", "nurses"}
-
-
-def _fake_decide(choice_index):
-    def fake(system, user, schema, model, timeout):
-        ids = schema["properties"]["chosen_option"]["enum"]
-        return {"chosen_option": ids[choice_index], "main_tradeoff": "stability", "claims": [],
-                "reasoning": "Fewer changes."}, None
-    return fake
-
-def test_decide_requires_event(client):
-    assert client.post("/api/decide").status_code == 409
-
-def test_decide_and_ai_options(client, monkeypatch):
-    monkeypatch.setattr("llm.decide.chat_json", _fake_decide(0))
-    ev = _open_event(client)
-    ai = client.get("/api/options?mode=ai").json()
-    st = client.get("/api/options?mode=strain").json()
-    assert ai["mode"] == "ai" and ai["options"][0] == st["options"][0]
-    r = client.post("/api/decide").json()
-    assert r["event_id"] == ev["event_id"] and r["decision"]["chosen_option"].startswith("Option_")
-    assert r["formula_top"] == st["options"][0]["id"] and "check" in r
-
-def test_apply_ai_mode_override_and_audit(client, monkeypatch):
-    monkeypatch.setattr("llm.decide.chat_json", _fake_decide(0))
-    ev = _open_event(client)
-    r = client.post("/api/decide").json()
-    pick = r["decision"]["chosen_option"]
-    others = [o["id"] for o in client.get("/api/options?mode=ai&limit=100").json()["options"] if o["id"] != pick]
-    if not others:
-        pytest.skip("single option")
-    body = {"event_id": ev["event_id"], "option_id": others[0], "mode": "ai"}
-    assert client.post("/api/apply", json=body).status_code == 422
-    assert client.post("/api/apply", json={**body, "override_reason": "preference"}).status_code == 200
-    e = client.get("/api/audit").json()["entries"][-1]
-    assert e["ai_choice"] == pick and e["formula_top"] == r["formula_top"]
-    assert e["ai_agrees"] == (pick == r["formula_top"]) and e["mode"] == "ai" and e["top_option"] == pick
-    assert e["explanation_source"] == r["source"] and e["rank"] >= 2
-
-def test_apply_ai_pick_needs_no_reason(client, monkeypatch):
-    monkeypatch.setattr("llm.decide.chat_json", _fake_decide(1))
-    ev = _open_event(client)
-    r = client.post("/api/decide").json()
-    ok = client.post("/api/apply", json={"event_id": ev["event_id"], "option_id": r["decision"]["chosen_option"], "mode": "ai"})
-    assert ok.status_code == 200
-    assert client.get("/api/audit").json()["entries"][-1]["rank"] == 1
-
-def test_ai_options_cover_candidate_set(client):
-    from llm.decide import build_decision_payload
-    _open_event(client)
-    ids = {o["id"] for o in build_decision_payload(server.STATE.ctx, server.STATE.scored, server.STATE.policy)["options"]}
-    shown = client.get("/api/options?mode=ai&limit=1").json()["options"]
-    assert ids == {o["id"] for o in shown}
-    ranks = [o["rank"] for o in shown]
-    assert ranks == sorted(ranks)
-
-def test_ai_apply_without_decision_logs_verified_none(client):
-    ev = _open_event(client)
-    top = client.get("/api/options?mode=ai").json()["options"][0]
-    assert client.post("/api/apply", json={"event_id": ev["event_id"], "option_id": top["id"], "mode": "ai"}).status_code == 200
-    assert client.get("/api/audit").json()["entries"][-1]["verified"] is None
+    assert set(st) == {"id", "rank", "rank_baseline", "kind", "change_text", "description", "n_changes", "delta_strain", "strain_cost", "nurses"}
 
 
 PREVIEW_KEYS = {"QR_total", "nurses_qr_ge3_28d", "max_qr", "gini_strain", "unfilled", "SN_total", "changes_per_repair"}
 
 def test_preview_has_both_policies(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)  # no e5 file -> no GenAI column
     client.post("/api/scenario", json={"seed": 1})
     pv = client.get("/api/state").json()["preview"]
     assert set(pv) == {"baseline", "strain"} and set(pv["baseline"]) == PREVIEW_KEYS == set(pv["strain"])
@@ -218,8 +160,7 @@ def test_fast_forward_to_day(client, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("LLM must not be called")
     monkeypatch.setattr("llm.service.chat_json", boom)
-    monkeypatch.setattr("llm.decide.chat_json", boom)
-    r = client.post("/api/fast-forward", json={"to_day": 15, "mode": "ai"}).json()
+    r = client.post("/api/fast-forward", json={"to_day": 15, "mode": "strain"}).json()
     assert r["resolved"] > 0 and r["resolved_open"] == 0
     st = r["state"]
     assert st["event"] is not None or st["remaining_events"] == 0
@@ -243,7 +184,7 @@ def test_fast_forward_requires_exactly_one_field(client):
 
 def test_options_include_comparison_in_all_modes(client):
     _open_event(client)
-    for mode in ("baseline", "strain", "ai"):
+    for mode in ("baseline", "strain"):
         c = client.get(f"/api/options?mode={mode}").json()["comparison"]
         assert set(c) == {"ours", "ortec", "plain_words", "difference", "who_words", "card_lines", "rest_lines"} and c["plain_words"] and "Option_" not in c["who_words"]
         assert {"id", "change_text", "description", "new_quick_returns", "heaviest_before", "heaviest_after",
@@ -305,131 +246,57 @@ def test_put_policy_defaults_to_manual_and_validates_source(client):
     assert client.put("/api/policy", json={**base, "policy_text": "a" * 1001}).status_code == 422
 
 
-def test_decide_includes_comparison(client, monkeypatch):
-    monkeypatch.setattr("llm.decide.chat_json", _fake_decide(1))
-    _open_event(client)
-    r = client.post("/api/decide").json()
-    c = r["comparison"]
-    assert set(c) == {"ours", "ortec", "plain_words", "difference", "who_words", "card_lines", "rest_lines", "formula_top"}
-    assert c["ours"]["id"] == r["decision"]["chosen_option"] and c["formula_top"] == r["formula_top"]
-    assert c["ortec"]["id"] == client.get("/api/options?mode=baseline").json()["comparison"]["ortec"]["id"]
-    assert c["plain_words"]
-
-
-def test_decide_without_decision_has_no_comparison(client, monkeypatch):
-    monkeypatch.setattr("llm.decide.chat_json", lambda *a, **k: (None, "ConnectError: down"))
-    _open_event(client)
-    r = client.post("/api/decide").json()
-    assert r["decision"] is None and "comparison" not in r
-
-
-def _write_e5(tmp_path, seed, rows=1):
-    cols = ["seed", "policy", *server.PREVIEW_KEYS]
-    lines = [",".join(cols)]
-    for _ in range(rows):
-        lines.append(",".join([str(seed), "ai", "5", "3", "1", "0.2", "0", "2", "1.5"]))
-    lines.append(",".join([str(seed), "baseline"] + ["9"] * len(server.PREVIEW_KEYS)))
-    (tmp_path / "e5_runs.csv").write_text("\n".join(lines) + "\n")
-
-
-def test_preview_includes_genai_column_when_e5_present(client, monkeypatch, tmp_path):
-    _write_e5(tmp_path, 1)
-    monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    pv = client.post("/api/scenario", json={"seed": 1}).json()["preview"]
-    assert set(pv) == {"baseline", "strain", "ai"} and set(pv["ai"]) == PREVIEW_KEYS
-    assert pv["ai"]["QR_total"] == 5 and pv["ai"]["changes_per_repair"] == 1.5
-
-
-def test_preview_without_genai_for_other_seed_missing_or_bad_file(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    assert "ai" not in client.post("/api/scenario", json={"seed": 1}).json()["preview"]  # no file
-    _write_e5(tmp_path, 4)
-    assert "ai" not in client.post("/api/scenario", json={"seed": 1}).json()["preview"]  # other seed
-    (tmp_path / "e5_runs.csv").write_bytes(b"\xff\xfe garbage\n1,2")
-    assert "ai" not in client.post("/api/scenario", json={"seed": 1}).json()["preview"]  # unreadable
-
-
-def _e5_text(tmp_path, body):
-    cols = ["seed", "policy", *server.PREVIEW_KEYS]
-    (tmp_path / "e5_runs.csv").write_text(",".join(cols) + "\n" + body)
-
-
-def test_e5_nan_row_is_skipped_not_500(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    _e5_text(tmp_path, "1,ai,5,3,1,nan,0,2,1.5\n")
-    r = client.post("/api/scenario", json={"seed": 1})
-    assert r.status_code == 200 and "ai" not in r.json()["preview"]
-    assert client.get("/api/state").status_code == 200
-    body = {"weights": {"QR": 1, "N": 1, "LR": 1, "OT": 1, "SN": 1}, "forward_days": 14, "squared": True}
-    assert client.put("/api/policy", json=body).status_code == 200
-    _e5_text(tmp_path, "1,ai,5,3,1,inf,0,2,1.5\n1,ai,4,3,1,0.2,0,2,1.0\n")  # good row still used
-    assert client.post("/api/scenario", json={"seed": 1}).json()["preview"]["ai"]["QR_total"] == 4
-
-
-def test_e5_missing_seed_and_truncated_row(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    _e5_text(tmp_path, "7,ai,5,3,1,0.2,0,2,1.5\n")
-    assert "ai" not in client.post("/api/scenario", json={"seed": 1}).json()["preview"]
-    _e5_text(tmp_path, "1,ai,5,3\n")
-    assert "ai" not in client.post("/api/scenario", json={"seed": 1}).json()["preview"]
-
-
 # ---- plain-English display fields and GenAI autoplay --------------------------------------------
 import time
 
 
-def _coded_decide(system, user, schema, model, timeout):
-    ids = schema["properties"]["chosen_option"]["enum"]
-    return {"chosen_option": ids[0], "main_tradeoff": "stability", "claims": [],
-            "reasoning": "adds 1 to QR and 1 to SN; strain up. Second sentence."}, None
-
-
-def test_explain_and_decide_add_display_text(client, monkeypatch):
-    def coded_explain(system, user, schema, model, timeout):
-        import json
-        pl = json.loads(user)
-        return {"recommended_option": pl["comparison"]["recommended"], "main_tradeoff": pl["comparison"]["main_driver"],
-                "claims": [], "text": "It adds 1 to QR for Nurse_68."}, None
-    monkeypatch.setattr("llm.service.chat_json", coded_explain)
-    monkeypatch.setattr("llm.decide.chat_json", _coded_decide)
+def test_explain_adds_plain_display_text(client, monkeypatch):
+    monkeypatch.setattr("llm.service.chat_json", lambda *a, **k: (
+        {"claims": [], "text": "It adds 1 to QR for Nurse_68. Option_999 is worse."}, None))
     _open_event(client)
     ex = client.post("/api/explain").json()
-    assert ex["explanation"]["text"] == "It adds 1 to QR for Nurse_68."  # raw text untouched
-    assert ex["display_text"] == "It adds 1 to quick returns for Nurse_68."
-    d = client.post("/api/decide").json()
-    assert d["decision"]["reasoning"].startswith("adds 1 to QR and 1 to SN; strain up")
-    assert d["display_text"] == "adds 1 to quick returns and 1 to last-minute call-ins; load up. Second sentence."
-    for r in (ex, d):
-        assert r["display_short"] == r["display_text"] and r["display_truncated"] is False
+    assert ex["explanation"]["text"].startswith("It adds 1 to QR for Nurse_68.")  # raw text untouched
+    # the rule's fact block comes first, then the plainified GenAI framing
+    assert ex["framing"] == "It adds 1 to quick returns for Nurse_68. Option_999 is worse."
+    assert ex["display_text"] == " ".join(ex["fact_block"]) + " " + ex["framing"]
 
 
 def test_display_short_truncates_long_text(client, monkeypatch):
     long = "First point. Second point. Third point. Fourth point."
-    monkeypatch.setattr("llm.decide.chat_json", lambda s, u, sc, m, t: (
-        {"chosen_option": sc["properties"]["chosen_option"]["enum"][0], "main_tradeoff": "stability",
-         "claims": [], "reasoning": long}, None))
-    _open_event(client)
-    d = client.post("/api/decide").json()
-    assert d["display_short"] == "First point. Second point." and d["display_truncated"] is True
-    assert d["display_text"] == long and d["decision"]["reasoning"] == long
-
-
-def test_template_explanation_has_display_text(client):
+    monkeypatch.setattr("llm.service.chat_json", lambda *a, **k: ({"claims": [], "text": long}, None))
     _open_event(client)
     ex = client.post("/api/explain").json()
-    assert "display_text" in ex and " QR " not in ex["display_text"]
+    assert ex["display_truncated"] is True and len(ex["display_short"]) < len(ex["display_text"])
+    assert ex["display_text"].endswith(long)
 
 
-def _first_id(system, user, schema, model, timeout):
-    return {"chosen_option": schema["properties"]["chosen_option"]["enum"][0], "main_tradeoff": "stability",
-            "claims": [], "reasoning": "Fewer changes. More text."}, None
+def test_explain_gets_only_the_facts_and_never_picks(client, monkeypatch):
+    import json
+    seen = {}
+
+    def fake(system, user, schema, model, timeout):
+        seen["payload"], seen["schema"] = json.loads(user), schema
+        return {"claims": [], "text": "Pick another option instead."}, None
+    monkeypatch.setattr("llm.service.chat_json", fake)
+    ev = _open_event(client)
+    client.put("/api/policy", json={"weights": load_json("policy.json")["weights"], "forward_days": 28,
+                                    "squared": True, "source": "genai", "policy_text": "Protect night workers."})
+    top = client.get("/api/options?mode=strain").json()["options"][0]["id"]
+    ex = client.post("/api/explain").json()
+    assert "chosen_option" not in seen["schema"]["properties"] and "recommended_option" not in seen["schema"]["properties"]
+    # final design (E10): GenAI only restates the facts, so it gets the fact block and nothing else
+    assert top == ex["chosen_option"] and set(seen["payload"]) == {"fact_block"}
+    r = client.post("/api/apply", json={"event_id": ev["event_id"], "option_id": top, "mode": "strain"})
+    assert r.status_code == 200  # the model's words cannot move the choice
 
 
-def _slow(delay=0.3):
-    def f(*a, **k):
+def _slow(monkeypatch, delay=0.3):
+    step = server._autoplay_step
+
+    def slow_step(mode):
         time.sleep(delay)
-        return _first_id(*a, **k)
-    return f
+        return step(mode)
+    monkeypatch.setattr(server, "_autoplay_step", slow_step)
 
 
 def _wait_auto(client, timeout=15):
@@ -450,35 +317,10 @@ def auto_client(client):
     _wait_auto(client)
 
 
-def test_autoplay_ai_runs_events_and_leaves_event_open(auto_client, monkeypatch):
-    client = auto_client
-    monkeypatch.setattr("llm.decide.chat_json", _first_id)
-    _open_event(client)  # an open event is resolved first and counts as the first of the three
-    n_hist = len(client.get("/api/state").json()["scoreboard"]["history"])
-    r = client.post("/api/autoplay", json={"events": 3, "mode": "ai"})
-    assert r.status_code == 200 and r.json() == {"started": True}
-    s = _wait_auto(client)
-    assert s["error"] is None and s["done"] == 3 and s["total"] == 3 and len(s["log"]) == 3
-    it = s["log"][0]
-    assert {"event_id", "absent", "day", "shift", "chosen", "chosen_change_text", "by", "agrees_with_formula",
-            "verified", "display_text", "plain_words", "description"} <= set(it)
-    assert it["description"] and "Option_" not in it["description"]
-    assert it["shift"] in ("Day", "Evening", "Night") and it["day"] >= 1 and it["by"] == "GenAI"
-    assert it["display_text"] == "Fewer changes."
-    entries = [e for e in client.get("/api/audit").json()["entries"] if e["mode"] == "auto-ai"]
-    assert len(entries) == 3
-    assert {"ai_choice", "formula_top", "ai_agrees", "ai_verified"} <= set(entries[0])
-    st = client.get("/api/state").json()
-    assert st["event"] is not None and st["autoplay_running"] is False
-    assert len(st["scoreboard"]["history"]) == n_hist + 3
-    # shadow synced: ORTEC scoreboard covers the same events
-    assert st["scoreboard"]["history"][-1]["n"] == n_hist + 3
-
-
 @pytest.mark.parametrize("mode,by", [("strain", "Formula"), ("baseline", "ORTEC-like")])
 def test_autoplay_non_llm_modes(auto_client, monkeypatch, mode, by):
     client = auto_client
-    monkeypatch.setattr("llm.decide.chat_json", lambda *a, **k: pytest.fail("LLM must not be called"))
+    monkeypatch.setattr("llm.service.chat_json", lambda *a, **k: pytest.fail("LLM must not be called"))
     client.post("/api/autoplay", json={"events": 2, "mode": mode})
     s = _wait_auto(client)
     assert s["done"] == 2 and s["error"] is None and all(i["by"] == by for i in s["log"])
@@ -487,16 +329,16 @@ def test_autoplay_non_llm_modes(auto_client, monkeypatch, mode, by):
 
 def test_autoplay_blocks_other_mutations_and_rejects_second_start(auto_client, monkeypatch):
     client = auto_client
-    monkeypatch.setattr("llm.decide.chat_json", _slow())
-    assert client.post("/api/autoplay", json={"events": 2, "mode": "ai"}).status_code == 200
+    _slow(monkeypatch)
+    assert client.post("/api/autoplay", json={"events": 2, "mode": "strain"}).status_code == 200
     assert client.get("/api/state").json()["autoplay_running"] is True
     assert client.get("/api/autoplay/status").json()["running"] is True
-    assert client.post("/api/autoplay", json={"events": 2, "mode": "ai"}).status_code == 409
+    assert client.post("/api/autoplay", json={"events": 2, "mode": "strain"}).status_code == 409
     for path, body in [("/api/next-event", None), ("/api/scenario", {"seed": 2}), ("/api/fast-forward", {"events": 1}),
-                       ("/api/decide", None), ("/api/explain", None),
+                       ("/api/explain", None),
                        ("/api/apply", {"event_id": 0, "option_id": "Option_1", "mode": "strain"})]:
         r = client.post(path, json=body) if body is not None else client.post(path)
-        assert r.status_code == 409 and r.json()["detail"] == "GenAI autoplay running", path
+        assert r.status_code == 409 and r.json()["detail"] == "Autoplay running", path
     pol = client.get("/api/policy").json()
     assert client.put("/api/policy", json={"weights": pol["weights"], "forward_days": 14, "squared": True}).status_code == 409
     s = _wait_auto(client)
@@ -506,8 +348,8 @@ def test_autoplay_blocks_other_mutations_and_rejects_second_start(auto_client, m
 
 def test_autoplay_stop_ends_early(auto_client, monkeypatch):
     client = auto_client
-    monkeypatch.setattr("llm.decide.chat_json", _slow())
-    client.post("/api/autoplay", json={"events": 10, "mode": "ai"})
+    _slow(monkeypatch)
+    client.post("/api/autoplay", json={"events": 10, "mode": "strain"})
     time.sleep(0.1)
     assert client.post("/api/autoplay/stop").status_code == 200
     s = _wait_auto(client)
@@ -515,71 +357,14 @@ def test_autoplay_stop_ends_early(auto_client, monkeypatch):
     assert client.get("/api/state").json()["event"] is not None
 
 
-def test_autoplay_fallback_applies_formula_top(auto_client, monkeypatch):
-    client = auto_client
-    monkeypatch.setattr("llm.decide.chat_json", lambda *a, **k: (None, "ConnectError: down"))
-    client.post("/api/autoplay", json={"events": 2, "mode": "ai"})
-    s = _wait_auto(client)
-    assert s["done"] == 2 and all(i["by"] == "Formula (fallback)" and i["chosen"] == i["formula_top"] for i in s["log"])
-    entries = [e for e in client.get("/api/audit").json()["entries"] if e["mode"] == "auto-ai"]
-    assert all(e["fallback"] and e["option_id"] == e["formula_top"] and e["ai_choice"] is None for e in entries)
-
-
-def test_autoplay_unknown_ai_option_falls_back(auto_client, monkeypatch):
-    client = auto_client
-    monkeypatch.setattr(server, "decide", lambda payload, top, model, timeout: {
-        "decision": {"chosen_option": "Option_999", "main_tradeoff": "stability", "claims": [], "reasoning": "x."},
-        "source": "m", "display_text": "x.", "check": {"verified": True}})
-    client.post("/api/autoplay", json={"events": 2, "mode": "ai"})
-    s = _wait_auto(client)
-    assert s["error"] is None and s["done"] == 2
-    assert all(i["by"] == "Formula (fallback)" and i["chosen"] == i["formula_top"] and i["verified"] is None for i in s["log"])
-
-
 def test_autoplay_validates_input(auto_client):
     assert auto_client.post("/api/autoplay", json={"events": 0}).status_code == 422
     assert auto_client.post("/api/autoplay", json={"events": 31}).status_code == 422
     assert auto_client.post("/api/autoplay", json={"events": 2, "mode": "x"}).status_code == 422
+    assert auto_client.post("/api/autoplay", json={"events": 2, "mode": "ai"}).status_code == 422  # GenAI never chooses
 
 
-def test_first_sentence():
-    assert server._first_sentence("One. Two.") == "One."
-    assert server._first_sentence("No stop") == "No stop"
-    assert server._first_sentence("Nurse_1 gets 1.5 more hours. Next.") == "Nurse_1 gets 1.5 more hours."
-
-
-# ---- headline, fair start, option-id backstop ---------------------------------------------------
-def _e5_files(tmp_path, ai_qr="133.2", ai_unf="1.2", seeds=(0, 1, 2)):
-    cols = "policy,QR_total,nurses_qr_ge3_28d,unfilled"
-    (tmp_path / "e5_summary.csv").write_text(f"{cols}\nbaseline,200,20,1.2\nstrain,100,5,1.2\nai,{ai_qr},10,{ai_unf}\n")
-    runs = ["seed,policy"] + [f"{s},ai" for s in seeds] + [f"{s},baseline" for s in seeds]
-    (tmp_path / "e5_runs.csv").write_text("\n".join(runs) + "\n")
-
-
-def test_headline_values_and_unfilled_flag(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    _e5_files(tmp_path, ai_qr="150")
-    h = client.get("/api/state").json()["headline"]
-    assert h["qr_pct"] == 25 and h["ge3_pct"] == 50 and h["unfilled_same"] is True and h["n_wards"] == 3
-    _e5_files(tmp_path, ai_unf="2.0")
-    h = client.get("/api/state").json()["headline"]
-    assert h["unfilled_same"] is False and h["unfilled_ai"] == 2.0 and h["unfilled_baseline"] == 1.2
-
-
-def test_headline_real_results_and_bad_files(client, monkeypatch, tmp_path):
-    h = client.get("/api/state").json()["headline"]
-    assert h is not None and h["qr_pct"] > 0 and h["n_wards"] >= 1
-    monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    assert client.get("/api/state").json()["headline"] is None  # missing
-    (tmp_path / "e5_summary.csv").write_bytes(b"\xff\xfe junk")
-    (tmp_path / "e5_runs.csv").write_text("seed,policy\n0,ai\n")
-    assert client.get("/api/state").json()["headline"] is None
-    (tmp_path / "e5_summary.csv").write_text("policy,QR_total,nurses_qr_ge3_28d,unfilled\nbaseline,0,0,1\nai,1,1,1\n")
-    assert client.get("/api/state").json()["headline"] is None  # no division by zero
-    (tmp_path / "e5_summary.csv").write_text("policy,QR_total,nurses_qr_ge3_28d,unfilled\nbaseline,5,5,1\nai,x,1,1\n")
-    assert client.get("/api/state").json()["headline"] is None
-
-
+# ---- fair start ---------------------------------------------------
 def test_fast_forward_reset_history_gives_identical_start(client):
     r = client.post("/api/fast-forward", json={"to_day": 29, "mode": "baseline", "reset_history": True}).json()
     sb = r["state"]["scoreboard"]
@@ -597,21 +382,6 @@ def test_fast_forward_reset_history_gives_identical_start(client):
 def test_fast_forward_keeps_history_by_default(client):
     client.post("/api/fast-forward", json={"events": 3, "mode": "baseline"})
     assert len(client.get("/api/state").json()["scoreboard"]["history"]) >= 3
-
-
-def test_option_ids_replaced_in_display_text_only(client, monkeypatch):
-    def chatty(system, user, schema, model, timeout):
-        ids = schema["properties"]["chosen_option"]["enum"]
-        return {"chosen_option": ids[0], "main_tradeoff": "stability", "claims": [],
-                "reasoning": f"{ids[0]} is fairest. Option_999 is worse."}, None
-    monkeypatch.setattr("llm.decide.chat_json", chatty)
-    _open_event(client)
-    d = client.post("/api/decide").json()
-    chosen = d["decision"]["chosen_option"]
-    assert chosen in d["decision"]["reasoning"]  # raw text untouched
-    desc = next(o["description"] for o in client.get("/api/options?mode=ai").json()["options"] if o["id"] == chosen)
-    assert "Option_" not in d["display_text"] and "Option_" not in d["display_short"]
-    assert d["display_text"].startswith(f"\u201c{desc}\u201d is fairest. another option is worse.")
 
 
 ZERO = {"quick_returns_avoided": 0, "quick_returns_change": 0, "extra_late_calls": 0, "nurses_3plus_change": 0}
@@ -644,61 +414,56 @@ def test_reset_history_forces_baseline_policy(client):
 
 def test_comparison_card_lines_in_options(client):
     _open_event(client)
-    cl = client.get("/api/options?mode=ai").json()["comparison"]["card_lines"]
+    cl = client.get("/api/options?mode=strain").json()["comparison"]["card_lines"]
     assert set(cl) == {"ours", "ortec", "rest_lines"} and len(cl["ours"]) >= 2 and len(cl["ortec"]) >= 2
     assert all(cl["rest_lines"][k] for k in ("ours", "ortec"))
     assert cl["ortec"][1].startswith("Result:") and cl["ours"][1].startswith("Result:")
 
 
 # ---- /api/results ---------------------------------------------------------------------------------
-RES_COLS = "seed,policy,QR_total,nurses_qr_ge3_28d,max_qr,unfilled,SN_total,changes_per_repair"
+RES_COLS = "arm,seed,QR_total,nurses_qr_ge3_28d,max_qr,unfilled,SN_total,changes_per_repair"
 
 
-def _res_files(tmp_path, e5_extra="", ai_rows=None):
-    ai_rows = ai_rows if ai_rows is not None else ["0,ai,100,10,5,1,80,1.5", "1,ai,90,8,4,0,70,1.6"]
-    cols = RES_COLS + (",model,verified_rate,fallback_rate,latency_p50_ms" if e5_extra else "")
-    ai = [r + (f",{e5_extra}" if e5_extra else "") for r in ai_rows]
-    (tmp_path / "e5_runs.csv").write_text("\n".join([cols] + ai + ["0,baseline,1,1,1,1,1,1"]) + "\n")
-    base = ["0,baseline,200,20,6,1,50,1.0", "1,baseline,100,10,3,0,60,1.0", "2,baseline,5,5,5,5,5,1", "0,strain,1,1,1,1,1,1"]
-    (tmp_path / "e1_runs.csv").write_text("\n".join([RES_COLS] + base) + "\n")
+def _res_files(tmp_path, b_rows=None, expl=None):
+    b_rows = b_rows if b_rows is not None else ["B,0,100,10,5,1,80,1.5", "B,1,90,8,4,0,70,1.6"]
+    rows = ["A,0,200,20,6,1,50,1.0", "A,1,100,10,3,0,60,1.0", "A,2,5,5,5,5,5,1"] + b_rows
+    (tmp_path / "e6_runs.csv").write_text("\n".join([RES_COLS] + rows) + "\n")
+    if expl:
+        (tmp_path / "e6_explanations_summary.csv").write_text(
+            "model,n_decisions,valid_output_rate,fact_check_pass_rate,direction_error_rate,mean_latency_s\n" + expl + "\n")
 
 
 def test_results_values(client, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
-    _res_files(tmp_path, e5_extra="qwen3:4b,0.5,0.1,12000")
+    _res_files(tmp_path, expl="qwen3:8b,400,1.0,0.9,0.05,10.2")
     r = client.get("/api/results").json()
-    assert r["available"] and r["n_wards"] == 2 and r["model"] == "qwen3:4b"  # seed 2 has no GenAI row
+    assert r["available"] and r["n_wards"] == 2  # seed 2 has no B row
     qr = next(m for m in r["metrics"] if m["key"] == "QR_total")
     assert qr["baseline"] == {"mean": 150.0, "min": 100.0, "max": 200.0}
-    assert qr["ai"] == {"mean": 95.0, "min": 90.0, "max": 100.0} and qr["wins"] == 2 and qr["cost"] is False
+    assert qr["ours"] == {"mean": 95.0, "min": 90.0, "max": 100.0} and qr["wins"] == 2 and qr["cost"] is False
     assert round(qr["change_pct"], 1) == -36.7
     mx = next(m for m in r["metrics"] if m["key"] == "max_qr")
     assert mx["wins"] == 1 and mx["ties"] == 0  # ward 2: 4 vs 3 is worse
     sn = next(m for m in r["metrics"] if m["key"] == "SN_total")
     assert sn["cost"] is True and sn["wins"] == 0
-    assert [w["ward"] for w in r["wards"]] == [1, 2] and r["wards"][0]["values"]["QR_total"] == {"baseline": 200.0, "ai": 100.0}
-    assert r["reliability"] == {"verified_rate": 0.5, "fallback_rate": 0.1, "latency_p50_ms": 12000.0,
-                                "seconds_per_decision": 12.0}
+    assert [w["ward"] for w in r["wards"]] == [1, 2]
+    assert r["wards"][0]["values"]["QR_total"] == {"baseline": 200.0, "ours": 100.0}
+    assert r["explanations"]["fact_check_pass_rate"] == 0.9 and r["explanations"]["model"] == "qwen3:8b"
 
 
-def test_results_without_reliability_columns(client, monkeypatch, tmp_path):
+def test_results_without_explanations(client, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
     _res_files(tmp_path)
     r = client.get("/api/results").json()
-    assert r["available"] and r["model"] is None
-    assert r["reliability"] == {"verified_rate": None, "fallback_rate": None, "latency_p50_ms": None,
-                                "seconds_per_decision": None}
+    assert r["available"] and r["explanations"] is None
 
 
 def test_results_missing_or_bad_files(client, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "RESULTS_DIR", tmp_path)
     assert client.get("/api/results").json() == {"available": False}  # nothing there
-    _res_files(tmp_path)
-    (tmp_path / "e1_runs.csv").unlink()
-    assert client.get("/api/results").json() == {"available": False}  # one file missing
-    _res_files(tmp_path, ai_rows=["0,ai,nan,10,5,1,80,1.5", "1,ai,,8,4,0,70,1.6"])
+    _res_files(tmp_path, b_rows=["B,0,nan,10,5,1,80,1.5", "B,1,,8,4,0,70,1.6"])
     assert client.get("/api/results").json() == {"available": False}  # non-finite / blank rows are skipped
-    (tmp_path / "e5_runs.csv").write_text("garbage\n")
+    (tmp_path / "e6_runs.csv").write_text("garbage\n")
     assert client.get("/api/results").json() == {"available": False}
 
 
@@ -708,10 +473,36 @@ def test_results_real_files(client):
     assert [m["cost"] for m in r["metrics"]] == [False, False, False, False, True, True]
 
 
-def test_rest_lines_in_options_and_decide(client, monkeypatch):
+def test_rest_lines_in_options(client):
     _open_event(client)
-    rl = client.get("/api/options?mode=ai").json()["comparison"]["rest_lines"]
+    rl = client.get("/api/options?mode=strain").json()["comparison"]["rest_lines"]
     assert rl["ours"] and rl["ortec"] and all(isinstance(x, str) for x in rl["ours"] + rl["ortec"])
     roster_before = {k: dict(v) for k, v in server.STATE.ctx.roster.by_nurse.items()}
-    client.get("/api/options?mode=ai")
+    client.get("/api/options?mode=strain")
     assert server.STATE.ctx.roster.by_nurse == roster_before  # temporary changes are always reverted
+
+
+def test_flagged_summary_is_hidden(client, monkeypatch):
+    monkeypatch.setattr("llm.service.chat_json", lambda *a, **k: ({"text": "This fits the policy and is fair."}, None))
+    _open_event(client)
+    ex = client.post("/api/explain").json()
+    assert ex["fact_block"] and ex["check"]["status"] == "mismatch" and ex["show_summary"] is False
+
+
+def test_strain_cost_is_what_the_rule_ranks_by(client):
+    _open_event(client)
+    opts = client.get("/api/options?mode=strain").json()["options"]
+    costs = [o["strain_cost"] for o in sorted(opts, key=lambda o: o["rank"])]
+    assert costs == sorted(costs)  # the rule's rank order is the strain-cost order
+
+
+def test_demo_opens_day4_case_with_default_weights(client):
+    client.put("/api/policy", json={"weights": {"QR": 3, "N": 1, "LR": 2, "OT": 0.5, "SN": 3}, "forward_days": 28,
+                                    "squared": True, "source": "genai", "policy_text": "x"})
+    r = client.post("/api/demo").json()
+    assert r["event"]["day"] + 1 == 4 and r["event"]["absent"] == "Nurse_43"
+    assert r["demo_policy_text"].startswith("Calling people in at the last minute")
+    assert client.get("/api/policy").json()["weights"]["SN"] == 1.5  # an earlier approval does not leak in
+    top = client.get("/api/options?mode=strain").json()["options"][0]
+    assert top["description"] == "Move Nurse 03 from the evening shift to the day shift; call in Nurse 10 for the evening shift"
+    assert r["since_takeover"]["calls_handled"] == 0

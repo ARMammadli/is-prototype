@@ -4,13 +4,13 @@ from llm.plain import plainify, shift_words
 
 
 @pytest.mark.parametrize("src,want", [
-    ("adds 1 to QR and 1 to SN for Nurse_68", "adds 1 to quick returns and 1 to last-minute call-ins for Nurse_68"),
-    ("LR rises", "long stretches rises"),
+    ("adds 1 to QR and 1 to SN for Nurse_68", "adds 1 to quick returns and 1 to short-notice changes for Nurse_68"),
+    ("LR rises", "long runs rises"),
     ("OT 2→3", "overtime 2→3"),
     ("Nurse_01 N 3→4", "Nurse_01 night shifts 3→4"),
     ("more N shifts for her", "more night shifts for her"),
     ("trade-off: quick_returns, short_notice, long_runs, nights, overtime",
-     "trade-off: quick returns, last-minute call-ins, long stretches, night shift"+"s, overtime"),
+     "trade-off: quick returns, short-notice changes, long runs, night shift"+"s, overtime"),
     ("more strain on her; Strain up", "more load on her; Load up"),
     ("Nurse_10 works Option_2 and Option_3", "Nurse_10 works Option_2 and Option_3"),
     ("Nurse_02: off → N", "Nurse_02: off → N"),

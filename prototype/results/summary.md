@@ -89,42 +89,6 @@ Acceptance probabilities (0.9 permissive; picky 0.9 / 0.3) are assumptions.
 
 Note: an offer with a 2-nurse move needs both nurses to accept, and the strain policy uses more 2-nurse moves, so its offers_per_fill is partly mechanical.
 
-## E5 — AI as decision-maker
-
-| policy | QR_total | gini_strain | max_qr | nurses_qr_ge3_28d | top10_qr_share | unfilled | changes_per_repair | SN_total | n_events |
-|---|---|---|---|---|---|---|---|---|---|
-| baseline | 182.400 | 0.218 | 6.000 | 24.400 | 0.197 | 1.200 | 1.020 | 71.200 | 81.400 |
-| strain | 115.000 | 0.177 | 4.800 | 6.200 | 0.226 | 1.200 | 1.808 | 123.800 | 81.400 |
-| ai | 120.000 | 0.199 | 5.000 | 10.000 | 0.242 | 1.000 | 1.968 | 137.000 | 81.400 |
-
-AI agreement with the formula: 31.8%; fallback rate: 0.0%; verified rate: 94.5%; agreement/fallback/verified pooled by decision count; latency = median of per-seed medians (12910 ms).
-
-| comparison | metric | mean_other | mean_ai | mean_diff | ci_low | ci_high | wilcoxon_p | effect_dz | n |
-|---|---|---|---|---|---|---|---|---|---|
-| ai vs strain | QR_total | 115.000 | 120.000 | 5.000 | 2.800 | 7.200 | 0.062 | 1.667 | 5 |
-| ai vs strain | gini_strain | 0.177 | 0.199 | 0.022 | 0.017 | 0.029 | 0.062 | 2.945 | 5 |
-| ai vs strain | max_qr | 4.800 | 5.000 | 0.200 | 0.000 | 0.600 | 1.000 | 0.447 | 5 |
-| ai vs strain | nurses_qr_ge3_28d | 6.200 | 10.000 | 3.800 | 3.000 | 5.000 | 0.062 | 2.914 | 5 |
-| ai vs strain | top10_qr_share | 0.226 | 0.242 | 0.016 | -0.006 | 0.033 | 0.188 | 0.665 | 5 |
-| ai vs strain | unfilled | 1.200 | 1.000 | -0.200 | -0.600 | 0.000 | 1.000 | -0.447 | 5 |
-| ai vs strain | changes_per_repair | 1.808 | 1.968 | 0.160 | 0.116 | 0.194 | 0.062 | 3.043 | 5 |
-| ai vs strain | SN_total | 123.800 | 137.000 | 13.200 | 10.400 | 15.600 | 0.062 | 3.859 | 5 |
-| ai vs strain | n_events | 81.400 | 81.400 | 0.000 | 0.000 | 0.000 | 1.000 | 0.000 | 5 |
-
-| comparison | metric | mean_other | mean_ai | mean_diff | ci_low | ci_high | wilcoxon_p | effect_dz | n |
-|---|---|---|---|---|---|---|---|---|---|
-| ai vs baseline | QR_total | 182.400 | 120.000 | -62.400 | -67.800 | -56.800 | 0.062 | -8.842 | 5 |
-| ai vs baseline | gini_strain | 0.218 | 0.199 | -0.019 | -0.027 | -0.012 | 0.062 | -1.930 | 5 |
-| ai vs baseline | max_qr | 6.000 | 5.000 | -1.000 | -1.600 | -0.400 | 0.125 | -1.414 | 5 |
-| ai vs baseline | nurses_qr_ge3_28d | 24.400 | 10.000 | -14.400 | -15.800 | -12.800 | 0.062 | -7.927 | 5 |
-| ai vs baseline | top10_qr_share | 0.197 | 0.242 | 0.044 | 0.034 | 0.053 | 0.062 | 3.719 | 5 |
-| ai vs baseline | unfilled | 1.200 | 1.000 | -0.200 | -0.600 | 0.000 | 1.000 | -0.447 | 5 |
-| ai vs baseline | changes_per_repair | 1.020 | 1.968 | 0.948 | 0.928 | 0.975 | 0.062 | 30.894 | 5 |
-| ai vs baseline | SN_total | 71.200 | 137.000 | 65.800 | 63.600 | 68.000 | 0.062 | 23.713 | 5 |
-| ai vs baseline | n_events | 81.400 | 81.400 | 0.000 | 0.000 | 0.000 | 1.000 | 0.000 | 5 |
-
-Caveat: n seeds = 5 (qwen3:8b; small sample).
-
 ## Economics bridge (extrapolation — not a simulation result)
 
 - Quick returns avoided per nurse-month: **0.452**
@@ -194,7 +158,7 @@ Caveat: n seeds = 5 (qwen3:8b; small sample).
     "forward_days": 28,
     "squared": true,
     "model": "qwen3:8b",
-    "ui_timeout_s": 20,
+    "ui_timeout_s": 30,
     "eval_timeout_s": 60
   }
 }

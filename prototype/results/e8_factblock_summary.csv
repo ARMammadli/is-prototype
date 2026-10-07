@@ -1,0 +1,2 @@
+model,n_decisions,valid_output_rate,fact_check_pass_rate,pass_same_as_ortec,pass_differs,mean_latency_s,rate_unsupported_numbers,rate_direction_errors,rate_nurse_direction_errors,rate_comparison_errors,rate_fact_block_errors
+qwen3:8b,400,1.0,0.925,1.0,0.9191374663072777,1.7054425000000002,0.0,0.0,0.075,0.0,0.0

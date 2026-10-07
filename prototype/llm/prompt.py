@@ -120,3 +120,100 @@ def build_payload(ctx, scored, policy: dict, k: int = 3) -> dict:
     }
     payload["comparison"] = build_comparison(payload)
     return payload
+
+
+# --- Rule ranks, GenAI explains (default mode) -------------------------------------------------
+# The hospital formula has already chosen. GenAI only explains that choice; it never picks.
+
+DEFAULT_POLICY_TEXT = ("Spread the extra work fairly: avoid giving any nurse a quick return, and do not add "
+                       "load to the nurses who already carry the most.")
+
+PLAIN_METRIC = {"QR": "quick returns", "N": "night shifts", "LR": "long stretches",
+                "OT": "overtime hours", "SN": "last-minute call-ins"}
+
+EXPLAIN_SYSTEM_PROMPT = f"""You explain a nurse roster repair decision that the hospital's fairness rule has ALREADY
+made. You do not choose and you never suggest a different option.
+You receive JSON with one absence, the manager's fairness policy (policy_text), the decision (the option the
+rule chose, the runner-up, and the option today's software would pick: fewest changes, most contract hours
+left) and those options. {DEFINITIONS}
+For every nurse, 'more' lists what goes up for that nurse, 'less' lists what goes down, and load_change is
+the load after minus the load before (positive = more load, negative = relieved).
+what_each_option_adds gives, per option, the total change for all its nurses (0 = it adds none; negative =
+it removes some). chosen_vs_todays_software says whether the chosen option adds more, fewer or the same
+of each item than today's software's choice. These are the ONLY source for any statement about what
+today's software's choice would do and about the cost of the chosen option.
+Write 2 to 3 short sentences (about 60 words) that say:
+1. who gets extra work in the chosen option, and who is relieved (if anyone);
+2. why the chosen option fits the policy better than today's software's choice (if
+   decision.same_as_todays_software is true, say both agree and compare with the runner-up instead);
+3. the cost, if any, for example more nurses changed or more last-minute call-ins.
+Rules:
+- {DIRECTION_RULE} A nurse whose item is in 'less' is relieved of it; never say that nurse gets more of it.
+- Never say today's software's choice adds an item when what_each_option_adds shows 0 or less for it.
+  Never call something a cost of the chosen option unless chosen_vs_todays_software says 'more' for it.
+- Refer to options by their description, never by their id. Refer to nurses as in the data.
+- Only use numbers that appear in the JSON. Do not cite weights or ranks.
+- Every before/after number you mention about a nurse must also be listed in claims.
+- Never speculate about health, burnout, motivation or private circumstances.
+- Cite at most 4 numbers and list at most 6 claims.
+{STYLE_RULES}"""
+
+EXPLAIN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "claims": {"type": "array", "items": CLAIM_ITEM_SCHEMA, "maxItems": 6},
+        "text": {"type": "string"},
+    },
+    "required": ["claims", "text"],
+}
+
+
+def _nurse_view(nd: dict) -> dict:
+    up = [PLAIN_METRIC[m] for m in METRICS if nd["after"][m] > nd["before"][m]]
+    down = [PLAIN_METRIC[m] for m in METRICS if nd["after"][m] < nd["before"][m]]
+    return {**nd, "load_change": round(nd["strain_after"] - nd["strain_before"], 2), "more": up, "less": down}
+
+
+def build_explain_payload(ctx, scored, policy: dict, policy_text: str | None = None) -> dict:
+    """The rule's choice, its runner-up and the ORTEC-like choice, with per-nurse before/after numbers."""
+    by_strain = rank_options(scored, "strain")
+    top, base_top = by_strain[0], rank_options(scored, "baseline")[0]
+    runner = by_strain[1] if len(by_strain) > 1 else None
+    chosen = [top]
+    for so in (runner, base_top):
+        if so is not None and all(so is not c for c in chosen):
+            chosen.append(so)
+    roles = {id(top): ["chosen by the hospital rule"]}
+    if runner is not None:
+        roles.setdefault(id(runner), []).append("runner-up")
+    roles.setdefault(id(base_top), []).append("today's software would pick this")
+    options = []
+    for so in chosen:
+        o = _option_payload(so, so is base_top)
+        o["role"] = " and ".join(roles.get(id(so), []))
+        o["nurses"] = [_nurse_view(nd) for nd in so.nurses]
+        options.append(o)
+    payload = {
+        "event": {"absent": ctx.absent, "day": ctx.day + 1, "shift": ctx.shift,
+                  "notice_h": round(ctx.notice_h, 1)},
+        "policy_text": policy_text or DEFAULT_POLICY_TEXT,
+        "weights": dict(policy["weights"]),
+        "decision": {"chosen": top.option.id, "runner_up": runner.option.id if runner else None,
+                     "todays_software": base_top.option.id,
+                     "same_as_todays_software": base_top is top},
+        "options": options,
+    }
+    adds = {o["id"]: _option_adds(o) for o in options}
+    payload["what_each_option_adds"] = {o["role"]: adds[o["id"]] for o in options}
+    if base_top is not top:
+        c, t = adds[top.option.id], adds[base_top.option.id]
+        payload["chosen_vs_todays_software"] = {
+            k: ("more" if c[k] > t[k] else "fewer" if c[k] < t[k] else "the same") for k in c}
+    payload["comparison"] = build_comparison(payload)
+    return payload
+
+
+def _option_adds(o: dict) -> dict:
+    out = {PLAIN_METRIC[m]: round(sum(nd["after"][m] - nd["before"][m] for nd in o["nurses"]), 1) for m in METRICS}
+    out["nurses changed"] = o["n_changes"]
+    return out

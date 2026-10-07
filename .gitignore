@@ -12,3 +12,4 @@ __pycache__/
 
 # Runtime data written by the demo app
 prototype/app/data/audit.jsonl
+dist/

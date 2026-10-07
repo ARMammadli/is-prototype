@@ -1,0 +1,9 @@
+# Tested with Python 3.14 on macOS. Versions are the ones the results were produced with.
+numpy>=2.3
+pandas>=2.3
+scipy>=1.17
+fastapi>=0.128
+uvicorn>=0.40
+httpx>=0.28
+pytest>=9.0
+matplotlib>=3.10   # only for regenerating figures

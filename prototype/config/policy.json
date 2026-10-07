@@ -10,6 +10,6 @@
   "forward_days": 28,
   "squared": true,
   "model": "qwen3:8b",
-  "ui_timeout_s": 20,
+  "ui_timeout_s": 30,
   "eval_timeout_s": 60
 }

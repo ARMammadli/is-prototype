@@ -116,25 +116,6 @@ def build_summary() -> str:
                 "",
                 "Note: an offer with a 2-nurse move needs both nurses to accept, and the strain policy uses more "
                 "2-nurse moves, so its offers_per_fill is partly mechanical.", ""]
-    if (e5 := _read("e5_summary.csv")) is not None:
-        ai = e5[e5.policy == "ai"].iloc[0]
-        runs5 = _read("e5_runs.csv")
-        model5 = str(runs5["model"].iloc[0]) if runs5 is not None and "model" in runs5.columns else "local LLM"
-        n_seeds = len(runs5) if runs5 is not None else 0
-        out += ["## E5 — AI as decision-maker", "",
-                md_table(e5, ["policy", "QR_total", "gini_strain", "max_qr", "nurses_qr_ge3_28d",
-                              "top10_qr_share", "unfilled", "changes_per_repair", "SN_total", "n_events"]), "",
-                f"AI agreement with the formula: {ai['agreement_rate']:.1%}; fallback rate: "
-                f"{ai['fallback_rate']:.1%}; verified rate: {ai['verified_rate']:.1%}; "
-                f"agreement/fallback/verified pooled by decision count; "
-                f"latency = median of per-seed medians ({ai['latency_p50_ms']:.0f} ms).", ""]
-        if (e5s := _read("e5_stats.csv")) is not None:
-            n_seeds = int(e5s["n"].iloc[0])
-            for other in ("strain", "baseline"):
-                out += [md_table(e5s[e5s.comparison == f"ai vs {other}"].assign(mean_other=lambda d, o=other: d[f"mean_{o}"]),
-                                 ["comparison", "metric", "mean_other", "mean_ai", "mean_diff", "ci_low", "ci_high",
-                                  "wilcoxon_p", "effect_dz", "n"]), ""]
-        out += [f"Caveat: n seeds = {n_seeds} ({model5}; small sample).", ""]
     if (runs := _read("e1_runs.csv")) is not None:
         e = economics_bridge(runs, ward_cfg)
         out += ["## Economics bridge (extrapolation — not a simulation result)", "",
