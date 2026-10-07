@@ -261,3 +261,159 @@ def write_report(facts: dict, model: str, timeout: float) -> dict:
     return {"report": report, "source": model if out else "unavailable", "error": error,
             "latency_ms": round((time.perf_counter() - t0) * 1000), "facts": public_facts(facts),
             "check": check_report(out, facts)}
+
+
+# --- Follow-up item 5: the rule writes every number, GenAI writes the words -----------------------
+
+_MEASURES = [("quick_returns", "Quick returns"), ("nurses_3plus_quick_returns", "Nurses with 3 or more quick returns"),
+             ("max_quick_returns_one_nurse", "Highest quick returns for one nurse"),
+             ("last_minute_call_ins", "Short-notice changes"), ("shift_changes_per_sick_call", "Shift changes per sick call"),
+             ("nurses_whose_shifts_changed", "Nurses whose shifts changed"), ("unfilled_shifts", "Unfilled shifts")]
+
+
+def render_month_facts(facts: dict) -> list[str]:
+    """Fixed sentences with every number of the month; neutral wording so the existing check never fires."""
+    r, o, d, pct = facts["hospital_rule"], facts["todays_software"], facts["rule_vs_todays_software"], facts["pct_change"]
+    s = [f"Ward {facts['ward']}, month {facts['month']} (days {facts['days']}): {facts['sick_calls']} sick calls.",
+         facts["source_note"]]
+    for k, label in _MEASURES:
+        p = f" ({pct[k]:+d}%)" if pct.get(k) is not None else ""
+        s.append(f"{label}: hospital rule {_norm(r[k])}, today's software {_norm(o[k])}; the rule's number is {d[k]}{p}.")
+    s.append(f"Quick returns already in the original roster this month: {facts['quick_returns_in_original_roster']}.")
+    for key, label in (("most_last_minute_call_ins", "last-minute call-ins"), ("most_quick_returns", "quick returns")):
+        rows = facts.get(key) or []
+        if rows:
+            vk = [k for k in rows[0] if k != "nurse"][0]
+            s.append(f"Most {label} under the hospital rule: " + ", ".join(f"{x['nurse']} {x[vk]}" for x in rows) + ".")
+    pl = facts.get("planner") or {}
+    if pl.get("note"):
+        s.append(pl["note"])
+    else:
+        reasons = ", ".join(f"{k} {v}" for k, v in pl.get("override_reasons", {}).items()) or "none"
+        s.append(f"Planner decisions logged: {pl.get('decisions_by_planner', 0)}; rule's choice accepted: "
+                 f"{pl.get('accepted_rule_choice', 0)}; overridden: {pl.get('overridden', 0)} (reasons: {reasons}).")
+    g = facts.get("genai_explanations")
+    if g:
+        s.append(f"GenAI explanations this month: {g['explained']} written, {g['passed_fact_check']} passed the fact "
+                 f"check, {g['flagged']} flagged (pass rate {g['pass_rate_pct']}%).")
+    return s
+
+
+MONTHLY_SPLIT_PROMPT = """You write the words of the monthly roster review for a hospital ward's scheduler and manager.
+You receive fact sentences written by the roster system for one 4-week month. They contain every number, and the
+manager reads them directly above your text. The hospital rule (which ranks sick-call repairs by the hospital's
+fairness formula) is compared with today's software (fewest changes) on the same sick calls.
+Write:
+- summary: 3 to 5 short sentences (at most 100 words): what the rule achieved on quick returns (back at work after
+  less than 11 hours' rest) and on heavily exposed nurses, what it cost in last-minute call-ins and shift changes,
+  what is known about the planner, and how reliable GenAI's explanations were (if a fact sentence gives it).
+- discussion_points: exactly 3 short, concrete points for the meeting. If many quick returns were already in the
+  original roster, suggest fixing those in next month's base roster, because then fewer last-minute call-ins are
+  needed. If some nurses carry many last-minute call-ins, suggest spreading them.
+Rules:
+- Do not write any digits, percentages or number words (one, two, ...). The numbers are in the fact sentences.
+- Use exactly the direction each fact sentence gives ('the rule's number is lower/higher/the same').
+- Name only nurses that appear in the fact sentences, exactly as written there; never blame individuals.
+- The roster numbers are from a simulated month; say so once. Describe the planner only from the planner sentence.
+- Never speculate about health, burnout, sickness causes, motivation or private circumstances.
+- Plain words for managers: say 'quick return', 'last-minute call-in', 'shift change'."""
+
+
+def write_report_split(facts: dict, model: str, timeout: float) -> dict:
+    from llm.factblock import fact_block_errors
+    t0 = time.perf_counter()
+    sents = render_month_facts(facts)
+    fact_text = " ".join(sents)
+    out, error = chat_json(MONTHLY_SPLIT_PROMPT, json.dumps({"facts": sents}), MONTHLY_SCHEMA, model, timeout)
+    if out is None and error is None:
+        error = "empty output"
+    if out is not None and not (isinstance(out, dict) and isinstance(out.get("summary"), str)
+                                and isinstance(out.get("discussion_points"), list)
+                                and all(isinstance(p, str) for p in out["discussion_points"])):
+        error, out = "invalid output shape", None
+    words = ({"summary": plainify(out["summary"]), "discussion_points": [plainify(p) for p in out["discussion_points"]]}
+             if out else None)
+    combined = {"summary": fact_text + " " + words["summary"], "discussion_points": words["discussion_points"]} if words else None
+    check = check_report(combined, facts)
+    genai_text = " ".join([words["summary"]] + words["discussion_points"]) if words else None
+    check["fact_block_errors"] = fact_block_errors(genai_text, fact_text)
+    if check["fact_block_errors"]:
+        check["verified"], check["status"] = False, "mismatch"
+    return {"report": words, "fact_sentences": sents, "source": model if out else "unavailable", "error": error,
+            "latency_ms": round((time.perf_counter() - t0) * 1000), "facts": public_facts(facts), "check": check}
+
+
+# --- E10: the rule shows all numbers in a table; GenAI writes only the narrative and 3 points ------
+
+def render_month_table(facts: dict) -> str:
+    r, o, d, pct = facts["hospital_rule"], facts["todays_software"], facts["rule_vs_todays_software"], facts["pct_change"]
+    rows = [f"Ward {facts['ward']}, month {facts['month']} (days {facts['days']}), {facts['sick_calls']} sick calls. "
+            f"{facts['source_note']} A short-notice change is any shift change made with less than 48 hours' notice.", "",
+            "| Measure | Hospital rule | Today's software | Rule's number is | Change |", "|---|---|---|---|---|"]
+    for k, label in _MEASURES:
+        label = "Most quick returns for any nurse" if k == "max_quick_returns_one_nurse" else label
+        ch = f"{pct[k]:+d}%" if pct.get(k) is not None else ""
+        rows.append(f"| {label} | {_norm(r[k])} | {_norm(o[k])} | {d[k]} | {ch} |")
+    rows.append(f"| Quick returns already in the original roster | {facts['quick_returns_in_original_roster']} | | | |")
+    for key, label in (("most_last_minute_call_ins", "Most short-notice changes (rule)"),
+                       ("most_quick_returns", "Most quick returns (rule)")):
+        xs = facts.get(key) or []
+        if xs:
+            vk = [k for k in xs[0] if k != "nurse"][0]
+            rows.append(f"| {label} | " + ", ".join(f"{x['nurse']} {x[vk]}" for x in xs) + " | | | |")
+    g = facts.get("genai_explanations")
+    if g:
+        rows.append(f"| GenAI summaries that passed the check and were shown | {g['passed_fact_check']} of {g['explained']} "
+                    f"({g['pass_rate_pct']}%) | | | |")
+    pl = facts.get("planner") or {}
+    rows += ["", pl["note"] if pl.get("note") else
+             f"Planner decisions logged: {pl.get('decisions_by_planner', 0)}; rule's choice accepted: "
+             f"{pl.get('accepted_rule_choice', 0)}; overridden: {pl.get('overridden', 0)}."]
+    return "\n".join(rows)
+
+
+MONTHLY_TABLE_PROMPT = """You write the words of the monthly roster review for a hospital ward's scheduler and manager.
+You receive a table written by the roster system for one simulated 4-week month. It contains every number and is
+shown to the manager directly above your text. The hospital rule (which ranks sick-call repairs by the hospital's
+formula) is compared with today's software (fewest changes) on the same sick calls.
+Write:
+- summary: 3 or 4 short sentences that restate what the table shows: for quick returns, nurses with 3 or more quick
+  returns, short-notice changes and shift changes, whether the rule's number is lower, higher or the same; what the
+  planner note says; and, if the table has a GenAI row, that some explanations were flagged.
+- discussion_points: exactly 3 short points for the meeting. Each point must name a table row it is about. Suitable
+  points: whether to fix the quick returns already in the original roster in next month's base roster; whether to
+  spread short-notice changes among the nurses listed; whether the extra shift changes are acceptable.
+Rules:
+- Only restate what the table says. Make no claim the table does not state: no causes, no 'may have', no 'effective',
+  no 'eliminated', no 'concentrated', no claims about fairness, load, burden or policy.
+- Use exactly the direction in the column 'Rule's number is'.
+- Do not write any digits, percentages or number words. The numbers are in the table.
+- Name only nurses listed in the table, exactly as written; never blame individuals.
+- Say once that the month is simulated. Describe the planner only from the planner note.
+- Never speculate about health, burnout, sickness causes, motivation or private circumstances.
+- Plain words for managers: say 'quick return', 'short-notice change' (any shift change with less than
+  48 hours' notice), 'shift change'."""
+
+
+def write_report_table(facts: dict, model: str, timeout: float) -> dict:
+    from llm.factblock import fact_block_errors, policy_claim_errors
+    t0 = time.perf_counter()
+    table = render_month_table(facts)
+    out, error = chat_json(MONTHLY_TABLE_PROMPT, table, MONTHLY_SCHEMA, model, timeout)
+    if out is None and error is None:
+        error = "empty output"
+    if out is not None and not (isinstance(out, dict) and isinstance(out.get("summary"), str)
+                                and isinstance(out.get("discussion_points"), list)
+                                and all(isinstance(p, str) for p in out["discussion_points"])):
+        error, out = "invalid output shape", None
+    words = ({"summary": plainify(out["summary"]), "discussion_points": [plainify(p) for p in out["discussion_points"]]}
+             if out else None)
+    check = check_report({"summary": table + " " + words["summary"], "discussion_points": words["discussion_points"]}
+                         if words else None, facts)
+    text = " ".join([words["summary"]] + words["discussion_points"]) if words else None
+    check["fact_block_errors"] = fact_block_errors(text, table)
+    check["policy_claim_errors"] = policy_claim_errors(text)
+    if check["fact_block_errors"] or check["policy_claim_errors"]:
+        check["verified"], check["status"] = False, "mismatch"
+    return {"report": words, "table": table, "source": model if out else "unavailable", "error": error,
+            "latency_ms": round((time.perf_counter() - t0) * 1000), "facts": public_facts(facts), "check": check}

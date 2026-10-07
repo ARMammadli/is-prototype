@@ -9,7 +9,7 @@
 </head>
 <body class="presenter">
 <header class="bar">
-  <h1><span class="logo x-presenter">🩺</span>Roster Repair <span class="sub x-expert">hospital ward · synthetic data</span><span class="tagline x-presenter">A nurse calls in sick — who should fill the gap?</span></h1>
+  <h1><span class="logo x-presenter" data-icon="pulse"></span>Roster Repair <span class="sub x-expert">hospital ward · synthetic data</span><span class="tagline x-presenter">A nurse calls in sick: who should fill the gap?</span></h1>
   <span id="setup" class="setup x-presenter">
     <details class="setup-box"><summary>Setup ▸</summary>
       <div class="setup-body">
@@ -20,8 +20,10 @@
           <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></label>
       </div>
     </details>
-    <button id="btn-start" class="primary">▶ Start</button>
+    <button id="btn-start" class="primary"><span data-icon="play"></span>Start</button>
+    <button id="btn-demo" type="button" title="Ward 1, day 4: Nurse 43 calls in sick. Same case every time.">Demo</button>
   </span>
+  <span id="llm-status" class="llm-status x-presenter"></span>
   <span class="x-expert"><label>Seed <input id="seed" type="number" value="0" min="0"></label>
     <button id="btn-new">New scenario</button></span>
   <div class="toggle x-expert">
@@ -40,9 +42,9 @@
   <button id="btn-view" class="view-toggle" title="Switch between the simple presenter view and the full detailed view">Show details</button>
 </header>
 <nav id="tabs" class="tabs x-presenter" role="tablist">
-  <button id="tab-one" role="tab" data-page="one" class="tab active">① One sick call</button>
-  <button id="tab-results" role="tab" data-page="results" class="tab">② Results across all wards</button>
-  <button id="tab-monthly" role="tab" data-page="monthly" class="tab">③ Monthly report</button>
+  <button id="tab-one" role="tab" data-page="one" class="tab active">1. One sick call</button>
+  <button id="tab-results" role="tab" data-page="results" class="tab">2. Results across all wards</button>
+  <button id="tab-monthly" role="tab" data-page="monthly" class="tab">3. Monthly report</button>
 </nav>
 <main id="page-one">
   <section id="preview-card" class="card a-preview x-expert">
@@ -50,7 +52,7 @@
   <div class="stack a-left">
     <section id="sick-card" class="card"><h2><span class="step x-presenter"><span class="num">1</span>A nurse calls in sick</span><span class="x-expert">Sick call</span></h2>
       <div id="event" class="big-line"></div>
-      <button id="btn-next" class="primary hidden">Next sick call ▶</button>
+      <button id="btn-next" class="primary hidden">Next sick call <span data-icon="arrow"></span></button>
     </section>
     <section id="explain-card" class="card hidden x-expert">
       <h2>GenAI explains the rule's choice <span id="explain-meta"></span></h2>
@@ -62,14 +64,14 @@
     <section id="compare-card" class="card hidden"><h2 id="compare-title">What happens</h2>
       <div id="compare"></div>
       <div id="plain" class="plain x-expert"><b>In plain words</b><p id="plain-text"></p></div>
-      <div id="genai-explains" class="explains x-presenter"></div>
       <p id="rule-line" class="rule-line x-expert"></p>
       <div class="x-presenter apply-row">
         <button id="btn-apply-main" class="primary big" disabled>Accept the rule's choice</button>
         <button id="btn-override-main" type="button" disabled>Choose another…</button>
         <span id="apply-status" class="muted"></span>
-        <span class="approve-note">Rule ranks, GenAI explains, you decide.</span>
+        <span class="approve-note">The rule ranks, GenAI explains, <b>you decide</b>.</span>
       </div>
+      <div id="genai-explains" class="explains x-presenter"></div>
     </section>
     <section class="card opts-card"><h2 id="opts-title">Ranked options (hospital rule)</h2><div id="options"></div>
       <p id="legend" class="muted"></p></section>
@@ -96,10 +98,10 @@
     <p class="muted x-expert">Both columns are the same ward after the same sick calls; only the repair choices differ. Lower is better.</p>
   </section>
   <section class="card a-roster x-expert"><h2>Roster</h2><div id="grid-wrap"><table id="grid"></table></div>
-    <p class="muted">D = day shift, E = evening shift, N = night shift, L = leave, X = absent (sick call). ★ = senior nurse.</p></section>
+    <p class="muted">D = day shift, E = evening shift, N = night shift, L = leave, X = absent (sick call). * = senior nurse.</p></section>
   <section class="card a-strain x-expert"><h2>Ward load score <span id="ward-kpis" class="muted"></span></h2>
     <canvas id="strain-chart" height="220"></canvas></section>
-  <section id="policy-card" class="card a-policy hidden x-expert"><h2>Hospital policy (load weights)</h2><form id="policy-form"></form>
+  <section id="policy-card" class="card a-policy hidden"><h2><span class="x-presenter">Hospital policy: say it in words, GenAI proposes the weights, you approve</span><span class="x-expert">Hospital policy (load weights)</span></h2><form id="policy-form" class="x-expert"></form>
     <div id="policy-nl">
       <label for="policy-text"><b>Describe your fairness policy in words</b></label>
       <textarea id="policy-text" rows="3" maxlength="1000" placeholder="Protect nurses from quick returns above all; nights matter less; avoid calling people at short notice."></textarea>
@@ -112,6 +114,7 @@
   <section class="card res-card">
     <h2 id="res-title">Results across all wards</h2>
     <p id="res-hero" class="res-hero"></p>
+    <div id="res-kpis" class="kpis"></div>
     <div id="res-table"></div>
     <div id="res-chart-box" class="hidden">
       <div class="chart-wrap res-chart"><canvas id="res-chart"></canvas></div>
@@ -123,16 +126,17 @@
 </main>
 <main id="page-monthly" class="results x-presenter">
   <section class="card res-card">
-    <h2>Monthly roster review — scheduler and manager</h2>
-    <p class="muted">The roster system computes every number with fixed rules. GenAI only writes the text, and every number in the text is checked against the facts.</p>
+    <h2>Monthly roster review: scheduler and manager</h2>
+    <p class="muted">The hospital rule computes every number and shows it in the table. GenAI writes only the narrative and three discussion points from that table; if the check flags the text, it is hidden.</p>
     <div class="mr-ctl">
       <label>Month <select id="mr-month"><option value="1">Month 1 (days 1–28)</option><option value="2">Month 2 (days 29–56)</option></select></label>
       <button id="btn-monthly" class="primary">Write report with GenAI</button>
       <span id="mr-status" class="muted"></span>
     </div>
+    <div id="mr-kpis" class="kpis"></div>
     <div class="mr-grid">
-      <div><div class="mr-who">Facts (computed by rules)</div><div id="mr-facts"></div></div>
-      <div><div class="mr-who">Report (written by GenAI, checked)</div><div id="mr-text" class="mr-text"></div></div>
+      <div><div class="mr-who">Table (computed by the hospital rule)</div><div id="mr-facts"></div></div>
+      <div><div class="mr-who">Narrative (written by GenAI from the table, checked)</div><div id="mr-text" class="mr-text"></div></div>
     </div>
   </section>
 </main>
@@ -150,6 +154,7 @@
     <menu><button value="cancel">Cancel</button><button value="ok" class="primary">Apply</button></menu>
   </form>
 </dialog>
+<footer class="foot" id="foot">Simulated wards built from Erasmus MC and Dutch parameters · GenAI runs locally (qwen3:8b) · the hospital rule ranks, the planner decides</footer>
 <div id="toast"></div>
 <script src="app.js"></script>
 </body>

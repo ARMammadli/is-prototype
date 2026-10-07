@@ -6,14 +6,14 @@ import re
 # "N" is also a shift letter, so only rewrite it as a metric: "N 3" or "N shifts".
 _RULES = [
     (re.compile(r"\bQR\b"), "quick returns"),
-    (re.compile(r"\bSN\b"), "last-minute call-ins"),
-    (re.compile(r"\bLR\b"), "long stretches"),
+    (re.compile(r"\bSN\b"), "short-notice changes"),
+    (re.compile(r"\bLR\b"), "long runs"),
     (re.compile(r"\bOT\b"), "overtime"),
     (re.compile(r"\bN shifts\b"), "night shifts"),
     (re.compile(r"\bN(?= \d)"), "night shifts"),
     (re.compile(r"\bquick_returns\b"), "quick returns"),
-    (re.compile(r"\bshort_notice\b"), "last-minute call-ins"),
-    (re.compile(r"\blong_runs\b"), "long stretches"),
+    (re.compile(r"\bshort_notice\b"), "short-notice changes"),
+    (re.compile(r"\blong_runs\b"), "long runs"),
     (re.compile(r"\bnights\b"), "night shifts"),
     (re.compile(r"\bovertime\b"), "overtime"),
     (re.compile(r"\b(?:strain|load)_before\b"), "load before"),

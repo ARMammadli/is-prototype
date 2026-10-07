@@ -41,7 +41,8 @@ def _qr_change(n: dict) -> int:
 
 
 def _load_move(n: dict | None) -> dict | None:
-    return None if n is None else {"nurse": n["nurse"], "before": n["strain_before"], "after": n["strain_after"]}
+    return None if n is None else {"nurse": n["nurse"], "before": n["strain_before"], "after": n["strain_after"],
+                                   "counts": dict(n["before"])}
 
 
 def pick_summary(so) -> dict:
@@ -57,7 +58,7 @@ def pick_summary(so) -> dict:
         "heaviest_after": max(n["strain_after"] for n in nurses),
         "people_disturbed": len({n["nurse"] for n in nurses}),
         "involved": [{"nurse": n["nurse"], "before": n["strain_before"], "after": n["strain_after"],
-                      "qr_change": _qr_change(n)} for n in nurses],
+                      "qr_change": _qr_change(n), "counts": dict(n["before"])} for n in nurses],
         "load_added": so.delta_strain,
         "extra_work": _load_move(max(up, key=_delta) if up else None),
         "relief": _load_move(min(down, key=_delta) if down else None),
@@ -130,6 +131,19 @@ def is_tired(strain_before: float, ward: dict | None) -> bool:
     t = (ward or {}).get("tired_at")
     return t is not None and t > 0 and strain_before >= t
 
+WINDOW_WORDS = "in the past and next 28 days"
+_COUNT_WORD = (("QR", "quick return", "quick returns"), ("N", "night", "nights"), ("LR", "long run", "long runs"),
+               ("OT", "overtime hour", "overtime hours"), ("SN", "short-notice change", "short-notice changes"))
+
+
+def counts_text(counts: dict | None) -> str:
+    """'3 quick returns, 4 nights' from a nurse's counts over the past and next 28 days (non-zero items only)."""
+    if not counts:
+        return ""
+    parts = [f"{_g(counts[k])} {one if counts[k] == 1 else many}" for k, one, many in _COUNT_WORD if counts.get(k)]
+    return ", ".join(parts) if parts else "no quick returns, nights, long runs, overtime or short-notice changes"
+
+
 def tiredness_word(strain_before: float, ward: dict | None) -> str:
     """'high' at/above the ward's 75th percentile, 'medium' at/above the median, else 'low'."""
     if is_tired(strain_before, ward):
@@ -137,29 +151,30 @@ def tiredness_word(strain_before: float, ward: dict | None) -> str:
     m = (ward or {}).get("median_at")
     return "medium" if m is not None and m > 0 and strain_before >= m else "low"
 
-def _who(nurse, before, ward: dict | None) -> str:
-    """'Nurse 67 (tiredness: high)'."""
-    return f"{nurse_name(nurse)} (tiredness: {tiredness_word(before, ward)})"
+def _who(nurse, before, ward: dict | None, counts: dict | None = None) -> str:
+    """'Nurse 67 (recent load: high, 3 quick returns, 4 nights in the past and next 28 days)'."""
+    c = counts_text(counts)
+    return f"{nurse_name(nurse)} (recent load: {tiredness_word(before, ward)}" + (f", {c} {WINDOW_WORDS})" if c else ")")
 
 def who_words(ours: dict, ortec: dict, ward: dict | None = None) -> str | None:
     """One plain sentence from two pick summaries (no ids, no LLM); None when there is nothing to say."""
     if ours["id"] == ortec["id"]:
-        return "Today's software and GenAI would make the same fix."
+        return "Today's software and the hospital rule would make the same fix."
     relief, extra = ours.get("relief"), ours.get("extra_work")
     if ours["new_quick_returns"] < 0 and relief:
-        left = f"{_who(relief['nurse'], relief['before'], ward)} is moved off a short rest"
+        left = f"{_who(relief['nurse'], relief['before'], ward, relief.get('counts'))} is moved off a short rest"
     elif extra:
-        left = f"{_who(extra['nurse'], extra['before'], ward)} takes the extra shift"
+        left = f"{_who(extra['nurse'], extra['before'], ward, extra.get('counts'))} takes the extra shift"
     else:
         return None
     r_extra = ortec.get("extra_work")
     if ortec["new_quick_returns"] > 0 and r_extra:
-        right = f"would make {_who(r_extra['nurse'], r_extra['before'], ward)} come back after a short rest"
+        right = f"would make {_who(r_extra['nurse'], r_extra['before'], ward, r_extra.get('counts'))} come back after a short rest"
     elif r_extra:
-        right = f"would add work to {_who(r_extra['nurse'], r_extra['before'], ward)}"
+        right = f"would add work to {_who(r_extra['nurse'], r_extra['before'], ward, r_extra.get('counts'))}"
     else:
         right = "would not add load to anyone"
-    return f"With GenAI, {left}; today's software {right}."
+    return f"With the hospital rule, {left}; today's software {right}."
 
 def _nurses_of(pick: dict) -> list[dict]:
     return pick.get("involved") or []
@@ -170,8 +185,8 @@ def _short_rest_nurse(pick: dict, sign: int) -> dict | None:
     return max(hits, key=lambda n: (abs(n["qr_change"]), n["before"])) if hits else None
 
 def _result(pick: dict, ward: dict | None) -> str:
-    """Deterministic 'Result: ...' line (tiredness as a word, no scores)."""
-    nm = lambda n: _who(n["nurse"], n["before"], ward)  # noqa: E731
+    """Deterministic 'Result: ...' line (recent load as a word plus the counts behind it)."""
+    nm = lambda n: _who(n["nurse"], n["before"], ward, n.get("counts"))  # noqa: E731
     made = _short_rest_nurse(pick, +1)
     freed = _short_rest_nurse(pick, -1)
     if freed is not None and made is None:
@@ -180,7 +195,7 @@ def _result(pick: dict, ward: dict | None) -> str:
         return f"Result: {nm(made)} gets a short rest."
     relief = pick.get("relief")
     if relief:
-        return f"Result: {nm({'nurse': relief['nurse'], 'before': relief['before']})} gets relief."
+        return f"Result: {nm(relief)} gets relief."
     return "Result: no one gets relief."
 
 REST_OK_H = 11.0
@@ -260,7 +275,9 @@ def _is_short(h) -> bool:
 
 
 def difference_text(ours: dict, ortec: dict, rest_fx: dict | None = None, ward: dict | None = None) -> str | None:
-    """One or two plain sentences on what GenAI's pick does differently from today's software (no LLM).
+    """One or two plain sentences on what the hospital rule's pick does differently from today's software.
+
+    Written by code from the roster data, never by GenAI.
 
     'ours'/'ortec' are pick_summary dicts; 'rest_fx' is {'ours': rest_effect(...), 'ortec': rest_effect(...)}.
     Returns None when there is nothing concrete to say.
@@ -268,8 +285,10 @@ def difference_text(ours: dict, ortec: dict, rest_fx: dict | None = None, ward: 
     if ours["id"] == ortec["id"]:
         return "Both chose the same fix here."
     rest_fx = rest_fx or {}
-    load = {n["nurse"]: n["before"] for n in (ortec.get("involved") or []) + (ours.get("involved") or [])}
-    who = lambda nid: _who(nid, load.get(nid, 0.0), ward)  # noqa: E731
+    inv = (ortec.get("involved") or []) + (ours.get("involved") or [])
+    load = {n["nurse"]: n["before"] for n in inv}
+    counts = {n["nurse"]: n.get("counts") for n in inv}
+    who = lambda nid: _who(nid, load.get(nid, 0.0), ward, counts.get(nid))  # noqa: E731
     ortec_nurses = {n["nurse"] for n in ortec.get("involved") or []}
     ours_short = {e["nurse"] for e in rest_fx.get("ours", []) if _is_short(e["after"])}
     parts = []
@@ -280,18 +299,18 @@ def difference_text(ours: dict, ortec: dict, rest_fx: dict | None = None, ward: 
         e = min(fixed, key=lambda x: x["before"])
         after = "11 h+" if e["after"] is None else _hours(e["after"])
         parts.append(f"Today's software leaves {who(e['nurse'])} with only {_hours(e['before'])} rest between two shifts; "
-                     f"GenAI changes the plan so they get {after}.")
+                     f"the hospital rule changes the plan so they get {after}.")
     made = [e for e in rest_fx.get("ortec", []) if _is_short(e["after"]) and not _is_short(e["before"])
             and e["nurse"] not in ours_short]
     if made:
         e = min(made, key=lambda x: x["after"])
-        parts.append(f"Today's software would bring {who(e['nurse'])} back after only {_hours(e['after'])} rest; GenAI avoids that.")
+        parts.append(f"Today's software would bring {who(e['nurse'])} back after only {_hours(e['after'])} rest; the hospital rule avoids that.")
     own = [e for e in rest_fx.get("ours", []) if _is_short(e["after"]) and not _is_short(e["before"])]
     if own:
         e = min(own, key=lambda x: x["after"])
-        parts.append(f"Note: GenAI's fix brings {who(e['nurse'])} back after only {_hours(e['after'])} rest.")
+        parts.append(f"Note: the hospital rule's fix brings {who(e['nurse'])} back after only {_hours(e['after'])} rest.")
     if not parts:
         rx, ox = ortec.get("extra_work"), ours.get("extra_work")
         if rx and ox and rx["nurse"] != ox["nurse"]:
-            parts.append(f"Today's software gives the extra work to {who(rx['nurse'])}; GenAI gives it to {who(ox['nurse'])}.")
+            parts.append(f"Today's software gives the extra work to {who(rx['nurse'])}; the hospital rule gives it to {who(ox['nurse'])}.")
     return " ".join(parts) or None

@@ -129,7 +129,7 @@ def test_response_shapes(client):
     base = client.get("/api/options?mode=baseline").json()["options"][0]
     assert set(base) == {"id", "rank", "kind", "change_text", "description", "nurse", "contract_h", "hours_period", "n_changes"}
     st = client.get("/api/options?mode=strain").json()["options"][0]
-    assert set(st) == {"id", "rank", "rank_baseline", "kind", "change_text", "description", "n_changes", "delta_strain", "nurses"}
+    assert set(st) == {"id", "rank", "rank_baseline", "kind", "change_text", "description", "n_changes", "delta_strain", "strain_cost", "nurses"}
 
 
 PREVIEW_KEYS = {"QR_total", "nurses_qr_ge3_28d", "max_qr", "gini_strain", "unfilled", "SN_total", "changes_per_repair"}
@@ -256,8 +256,9 @@ def test_explain_adds_plain_display_text(client, monkeypatch):
     _open_event(client)
     ex = client.post("/api/explain").json()
     assert ex["explanation"]["text"].startswith("It adds 1 to QR for Nurse_68.")  # raw text untouched
-    assert ex["display_text"] == "It adds 1 to quick returns for Nurse_68. another option is worse."
-    assert ex["display_short"] == ex["display_text"] and ex["display_truncated"] is False
+    # the rule's fact block comes first, then the plainified GenAI framing
+    assert ex["framing"] == "It adds 1 to quick returns for Nurse_68. Option_999 is worse."
+    assert ex["display_text"] == " ".join(ex["fact_block"]) + " " + ex["framing"]
 
 
 def test_display_short_truncates_long_text(client, monkeypatch):
@@ -265,11 +266,11 @@ def test_display_short_truncates_long_text(client, monkeypatch):
     monkeypatch.setattr("llm.service.chat_json", lambda *a, **k: ({"claims": [], "text": long}, None))
     _open_event(client)
     ex = client.post("/api/explain").json()
-    assert ex["display_short"] == "First point. Second point." and ex["display_truncated"] is True
-    assert ex["display_text"] == long
+    assert ex["display_truncated"] is True and len(ex["display_short"]) < len(ex["display_text"])
+    assert ex["display_text"].endswith(long)
 
 
-def test_explain_gets_rule_choice_and_policy_text_and_never_picks(client, monkeypatch):
+def test_explain_gets_only_the_facts_and_never_picks(client, monkeypatch):
     import json
     seen = {}
 
@@ -283,8 +284,8 @@ def test_explain_gets_rule_choice_and_policy_text_and_never_picks(client, monkey
     top = client.get("/api/options?mode=strain").json()["options"][0]["id"]
     ex = client.post("/api/explain").json()
     assert "chosen_option" not in seen["schema"]["properties"] and "recommended_option" not in seen["schema"]["properties"]
-    assert seen["payload"]["decision"]["chosen"] == top == ex["chosen_option"]
-    assert seen["payload"]["policy_text"] == "Protect night workers."
+    # final design (E10): GenAI only restates the facts, so it gets the fact block and nothing else
+    assert top == ex["chosen_option"] and set(seen["payload"]) == {"fact_block"}
     r = client.post("/api/apply", json={"event_id": ev["event_id"], "option_id": top, "mode": "strain"})
     assert r.status_code == 200  # the model's words cannot move the choice
 
@@ -479,3 +480,29 @@ def test_rest_lines_in_options(client):
     roster_before = {k: dict(v) for k, v in server.STATE.ctx.roster.by_nurse.items()}
     client.get("/api/options?mode=strain")
     assert server.STATE.ctx.roster.by_nurse == roster_before  # temporary changes are always reverted
+
+
+def test_flagged_summary_is_hidden(client, monkeypatch):
+    monkeypatch.setattr("llm.service.chat_json", lambda *a, **k: ({"text": "This fits the policy and is fair."}, None))
+    _open_event(client)
+    ex = client.post("/api/explain").json()
+    assert ex["fact_block"] and ex["check"]["status"] == "mismatch" and ex["show_summary"] is False
+
+
+def test_strain_cost_is_what_the_rule_ranks_by(client):
+    _open_event(client)
+    opts = client.get("/api/options?mode=strain").json()["options"]
+    costs = [o["strain_cost"] for o in sorted(opts, key=lambda o: o["rank"])]
+    assert costs == sorted(costs)  # the rule's rank order is the strain-cost order
+
+
+def test_demo_opens_day4_case_with_default_weights(client):
+    client.put("/api/policy", json={"weights": {"QR": 3, "N": 1, "LR": 2, "OT": 0.5, "SN": 3}, "forward_days": 28,
+                                    "squared": True, "source": "genai", "policy_text": "x"})
+    r = client.post("/api/demo").json()
+    assert r["event"]["day"] + 1 == 4 and r["event"]["absent"] == "Nurse_43"
+    assert r["demo_policy_text"].startswith("Calling people in at the last minute")
+    assert client.get("/api/policy").json()["weights"]["SN"] == 1.5  # an earlier approval does not leak in
+    top = client.get("/api/options?mode=strain").json()["options"][0]
+    assert top["description"] == "Move Nurse 03 from the evening shift to the day shift; call in Nurse 10 for the evening shift"
+    assert r["since_takeover"]["calls_handled"] == 0

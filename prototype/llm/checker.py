@@ -101,8 +101,8 @@ def nurse_direction_errors(text, payload: dict) -> list[str]:
     return out
 
 
-_METRIC_PHRASE = {"QR": r"quick returns?", "SN": r"(?:last-minute )?call-ins?", "N": r"night shifts?",
-                  "OT": r"overtime", "LR": r"long stretch(?:es)?"}
+_METRIC_PHRASE = {"QR": r"quick returns?", "SN": r"(?:last-minute )?call-ins?|short-notice changes?", "N": r"night shifts?",
+                  "OT": r"overtime", "LR": r"long stretch(?:es)?|long runs?"}
 _ADD = re.compile(r"\b(adds?|added|adding|gives?|gave|more|extra|another)\b", re.I)
 
 

@@ -14,7 +14,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from llm.monthly import compute_month_facts, write_report
+from llm.ollama_client import is_available
+from llm.monthly import compute_month_facts, write_report_table
 from llm.plain import plainify, replace_option_ids, shift_words
 from llm.policy_translate import translate_policy
 from llm.prompt import build_explain_payload
@@ -39,10 +40,10 @@ PREVIEW_KEYS = ("QR_total", "nurses_qr_ge3_28d", "max_qr", "gini_strain", "unfil
                 "changes_per_repair")
 
 RESULT_METRICS = (("QR_total", "Quick returns per ward (8 weeks)", False),
-                  ("nurses_qr_ge3_28d", "Nurses with 3+ quick returns in 4 weeks", False),
+                  ("nurses_qr_ge3_28d", "Nurses with 3+ quick returns in any 28 days", False),
                   ("max_qr", "Most quick returns for one nurse", False),
                   ("unfilled", "Unfilled shifts", False),
-                  ("SN_total", "Last-minute call-ins", True),
+                  ("SN_total", "Short-notice changes (<48 h notice)", True),
                   ("changes_per_repair", "Shifts changed per sick call", True))
 
 def _read_rows(name: str, value: str, col: str = "policy") -> list[dict]:
@@ -74,7 +75,20 @@ def _finite_mean(rows: list[dict], key: str) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 def _explanation_reliability(model: str | None) -> dict | None:
-    """Arm B explanation quality for the app's model from results/e6_explanations_summary.csv."""
+    """Final design (E10): coverage, hand-read errors and seconds per summary; falls back to the E6 summary."""
+    e10 = _read_jsonl(RESULTS_DIR / "e10_restate_scored.jsonl")
+    if e10:
+        try:
+            hand = json.loads((RESULTS_DIR / "e10_hand_read.json").read_text())
+        except (OSError, ValueError):
+            hand = {}
+        valid = [r for r in e10 if r.get("valid")]
+        lat = [r["latency_ms"] for r in valid if isinstance(r.get("latency_ms"), (int, float))]
+        return {"design": "e10", "model": model, "n_decisions": len(e10),
+                "coverage": sum(1 for r in e10 if r.get("shown")) / len(e10),
+                "mean_latency_s": (sum(lat) / len(lat) / 1000) if lat else None,
+                "hand_sample": hand.get("sample"), "hand_errors": hand.get("any_error"),
+                "hand_factual": hand.get("factual_errors"), "hand_wording": hand.get("wording_errors")}
     try:
         with (RESULTS_DIR / "e6_explanations_summary.csv").open(newline="") as fh:
             rows = list(csv.DictReader(fh))
@@ -326,6 +340,7 @@ def _option_json(so, mode: str) -> dict:
                 "n_changes": opt.n_changes}
     return {"id": opt.id, "rank": so.rank_strain, "rank_baseline": so.rank_baseline, "kind": opt.kind,
             "change_text": describe(opt), "description": plain_change(opt), "n_changes": opt.n_changes, "delta_strain": so.delta_strain,
+            "strain_cost": round(so.cost, 2),
             "nurses": so.nurses}
 
 
@@ -349,6 +364,12 @@ def _require_event() -> None:
         raise HTTPException(status_code=409, detail="No open event")
 
 
+@app.get("/api/llm-status")
+def llm_status() -> dict:
+    """Is the local model reachable? Informational only: the rule and its facts never depend on it."""
+    return {"available": is_available(), "model": STATE.policy.get("model", "qwen3:8b")}
+
+
 @app.get("/api/results")
 def get_results() -> dict:
     """Results across all measured wards for the presenter's second page (read-only CSVs, no LLM)."""
@@ -361,6 +382,33 @@ def new_scenario(body: ScenarioIn) -> dict:
         STATE.reset(body.seed)
         _auto_reset()
         return _state_json()
+
+
+# Demo Day: one button (or ?demo=1) always opens the same case. Ward 1 (seed 0), default weights, the rule
+# handles the earlier sick calls, and the day-4 sick call (Nurse 43, day shift) is opened for the planner.
+DEMO_SEED, DEMO_DAY, DEMO_ABSENT = 0, 4, "Nurse_43"
+DEMO_POLICY_TEXT = "Calling people in at the last minute is the thing our staff hate most. Make it count double."
+
+
+@app.post("/api/demo")
+def start_demo() -> dict:
+    with STATE_LOCK:
+        _guard_auto()
+        STATE.policy = load_json("policy.json")  # default weights, so an earlier approval never leaks in
+        STATE.reset(DEMO_SEED)
+        _auto_reset()
+        while True:
+            ctx = STATE.scenario.next_context()
+            if ctx is None:
+                raise HTTPException(status_code=500, detail="Demo sick call not found")
+            if ctx.day + 1 == DEMO_DAY and ctx.absent == DEMO_ABSENT:
+                if not _begin(ctx):
+                    raise HTTPException(status_code=500, detail="Demo sick call has no options")
+                break
+            _auto_resolve(ctx, "strain")
+        STATE.history = []
+        STATE.mark_start()  # the score starts counting at the demo sick call
+        return {**_state_json(), "demo_policy_text": DEMO_POLICY_TEXT}
 
 
 @app.get("/api/state")
@@ -682,14 +730,17 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 @app.post("/api/monthly-report")
 def monthly_report(body: MonthlyIn) -> dict:
-    """Monthly scheduler-manager review: rules compute the facts, GenAI writes the text, the text is checked."""
+    """Monthly scheduler-manager review (final design, E10): the rule's table holds every number; GenAI writes only
+    the narrative and 3 points from that table; the text is checked and hidden in the UI when flagged."""
     with STATE_LOCK:
         seed, policy = STATE.scenario.seed, dict(STATE.policy)
     model = policy.get("model", "qwen3:8b")
-    expl = _read_jsonl(RESULTS_DIR / f"e6_explanations_{model.replace(':', '-')}.jsonl")
+    # GenAI summaries of the final design (E10): 'verified' = passed the check and shown to the planner
+    expl = [{"seed": r["seed"], "event_id": r["event_id"], "verified": bool(r.get("shown"))}
+            for r in _read_jsonl(RESULTS_DIR / "e10_restate_scored.jsonl")]
     facts = compute_month_facts(seed, body.month, policy, audit_entries=_read_jsonl(AUDIT_PATH),
                                 explanation_rows=expl)
-    result = write_report(facts, model, max(60, policy.get("ui_timeout_s", 30)))
+    result = write_report_table(facts, model, max(60, policy.get("ui_timeout_s", 30)))
     _append_audit({"mode": "monthly_report", "month": body.month, "source": result["source"],
                    "report_status": result["check"]["status"], "error": result["error"]})
     return result
