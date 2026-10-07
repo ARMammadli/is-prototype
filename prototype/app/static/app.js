@@ -57,6 +57,7 @@ let autoRunning = false;
 let autoMode = "strain";
 let autoTimer = null;
 let mode = "strain";
+let llmMode = "live";  // "replay": GenAI answers were pre-generated locally; the model is not on this server
 let explanation = null;
 let explainPending = false;
 let explainError = null;
@@ -186,6 +187,8 @@ function setAiText(id, r, fallback) {
 // GenAI explains the rule's choice. The choice is already made: accept is enabled before this returns,
 // and if GenAI fails the ranked table stays without a narrative (the server logs the failure at apply).
 const EXPLAIN_UNAVAILABLE = "GenAI unavailable, facts shown. The rule's choice and its facts do not need GenAI.";
+const NOT_RECORDED = "Not pre-generated for this case: GenAI is not deployed on this server, so the rule's facts are shown.";
+const genaiMissText = (r, fallback) => (r && r.not_recorded ? NOT_RECORDED : fallback);
 async function explain() {
   explainPending = true;
   $("#explain-card").classList.remove("hidden");
@@ -225,7 +228,7 @@ function renderExplanation(r) {
   if (!r.explanation) {
     $("#explain-meta").innerHTML = `<span class="src">${esc(r.source)} · ${r.latency_ms} ms</span>`;
     clearShowFull("#explain-text");
-    $("#explain-text").textContent = EXPLAIN_UNAVAILABLE + (r.error ? ` (${r.error})` : "");
+    $("#explain-text").textContent = r.not_recorded ? NOT_RECORDED : EXPLAIN_UNAVAILABLE + (r.error ? ` (${r.error})` : "");
     $("#explain-claims").innerHTML = "";
     return;
   }
@@ -344,8 +347,16 @@ async function llmStatus() {
   try {
     const r = await api("/api/llm-status");
     const el = $("#llm-status");
-    el.innerHTML = r.available ? `${icon("check")} GenAI online (${esc(r.model)})` : `${icon("warn")} GenAI unavailable, facts shown`;
+    llmMode = r.mode || "live";
+    const replay = llmMode === "replay";
+    el.innerHTML = !r.available ? `${icon("warn")} GenAI unavailable, facts shown`
+      : replay ? `${icon("check")} GenAI answers pre-generated locally (${esc(r.model)})` : `${icon("check")} GenAI online (${esc(r.model)})`;
+    el.title = replay ? "The model could not be deployed on this server. Its answers were generated beforehand on a local machine with the same prompts and are replayed here; cases that were not pre-generated show the rule's facts only." : "";
     el.classList.toggle("off", !r.available);
+    if (replay) {
+      $("#foot-genai").textContent = `GenAI answers pre-generated locally (${r.model}), the model is not deployed on this server`;
+      $("#seed-box").classList.add("hidden");  // only the five wards in Setup were pre-generated
+    }
   } catch (e) { /* status is informational only */ }
 }
 
@@ -748,7 +759,8 @@ async function translatePolicy() {
     const r = await api("/api/policy/translate", { method: "POST", body: JSON.stringify({ text }) });
     if (!r.proposal) {
       $("#translate-status").textContent = "";
-      $("#translate-result").innerHTML = `<p class="muted" title="${esc(r.error || "")}">${icon("warn")} GenAI unavailable, no proposal made. The current weights stay in force.</p>`;
+      const miss = r.not_recorded ? `${NOT_RECORDED} A pre-generated answer exists for the example sentence (press Demo to restore it).` : "GenAI unavailable, no proposal made.";
+      $("#translate-result").innerHTML = `<p class="muted" title="${esc(r.error || "")}">${icon("warn")} ${esc(miss)} The current weights stay in force.</p>`;
       return;
     }
     proposal = { weights: r.proposal.weights, text };
@@ -947,7 +959,7 @@ async function writeMonthly() {
         kpiTile("Nurses with 3+ quick returns", pc.nurses_3plus_quick_returns, o.nurses_3plus_quick_returns, h.nurses_3plus_quick_returns, false) +
         kpiTile("Short-notice changes", pc.last_minute_call_ins, o.last_minute_call_ins, h.last_minute_call_ins, true); }
     if (!r.report) {
-      $("#mr-text").innerHTML = `<p class="muted" title="${esc(r.error || "")}">${icon("warn")} GenAI unavailable, facts shown. The table on the left is complete and computed without GenAI.</p>`;
+      $("#mr-text").innerHTML = `<p class="muted" title="${esc(r.error || "")}">${icon("warn")} ${esc(genaiMissText(r, "GenAI unavailable, facts shown."))} The table on the left is complete and computed without GenAI.</p>`;
     } else {
       const c = r.check, issues = [];
       if (c.unsupported_numbers.length) issues.push(`Numbers not in the facts: ${c.unsupported_numbers.join(", ")}`);

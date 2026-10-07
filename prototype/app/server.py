@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from llm.ollama_client import is_available
+from llm.ollama_client import LLM_MODE, NOT_RECORDED, is_available, is_replay
 from llm.monthly import compute_month_facts, write_report_table
 from llm.plain import plainify, replace_option_ids, shift_words
 from llm.policy_translate import translate_policy
@@ -364,10 +364,19 @@ def _require_event() -> None:
         raise HTTPException(status_code=409, detail="No open event")
 
 
+def _mark_replay(result: dict) -> dict:
+    """Replay mode: label pre-generated GenAI text and flag prompts that were never recorded."""
+    if is_replay():
+        if result.get("source") not in (None, "unavailable", "template"):
+            result["source"] = f"{result['source']} (pre-generated)"
+        result["not_recorded"] = result.get("error") == NOT_RECORDED
+    return result
+
+
 @app.get("/api/llm-status")
 def llm_status() -> dict:
     """Is the local model reachable? Informational only: the rule and its facts never depend on it."""
-    return {"available": is_available(), "model": STATE.policy.get("model", "qwen3:8b")}
+    return {"available": is_available(), "model": STATE.policy.get("model", "qwen3:8b"), "mode": LLM_MODE}
 
 
 @app.get("/api/results")
@@ -531,7 +540,7 @@ def explain_current() -> dict:
             raise HTTPException(status_code=409, detail="No options to explain")
         payload = build_explain_payload(ctx, STATE.scored, STATE.policy, STATE.policy_text)
         model, timeout = STATE.policy.get("model", "qwen3:8b"), STATE.policy.get("ui_timeout_s", 30)
-    result = explain_decision(payload, model, timeout)  # explains the rule's choice; never changes it
+    result = _mark_replay(explain_decision(payload, model, timeout))  # explains the rule's choice; never changes it
     with STATE_LOCK:
         if STATE.ctx is ctx:
             STATE.explanation = result
@@ -595,7 +604,7 @@ def get_policy() -> dict:
 def translate(body: TranslateIn) -> dict:
     """Propose weights from words. Read-only: the policy is only changed by PUT /api/policy."""
     current = dict(STATE.policy["weights"])
-    result = translate_policy(body.text, current, STATE.policy.get("model", "qwen3:8b"), 45)
+    result = _mark_replay(translate_policy(body.text.strip(), current, STATE.policy.get("model", "qwen3:8b"), 45))
     if result.get("proposal"):
         result["proposal"]["rationale_plain"] = plainify(result["proposal"].get("rationale"))
     return {**result, "current": current}
@@ -738,9 +747,10 @@ def monthly_report(body: MonthlyIn) -> dict:
     # GenAI summaries of the final design (E10): 'verified' = passed the check and shown to the planner
     expl = [{"seed": r["seed"], "event_id": r["event_id"], "verified": bool(r.get("shown"))}
             for r in _read_jsonl(RESULTS_DIR / "e10_restate_scored.jsonl")]
-    facts = compute_month_facts(seed, body.month, policy, audit_entries=_read_jsonl(AUDIT_PATH),
-                                explanation_rows=expl)
-    result = write_report_table(facts, model, max(60, policy.get("ui_timeout_s", 30)))
+    # pre-generated reports were written without the live planner log, so the table must match them
+    audit = [] if LLM_MODE in ("record", "replay") else _read_jsonl(AUDIT_PATH)
+    facts = compute_month_facts(seed, body.month, policy, audit_entries=audit, explanation_rows=expl)
+    result = _mark_replay(write_report_table(facts, model, max(60, policy.get("ui_timeout_s", 30))))
     _append_audit({"mode": "monthly_report", "month": body.month, "source": result["source"],
                    "report_status": result["check"]["status"], "error": result["error"]})
     return result

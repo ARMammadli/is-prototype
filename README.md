@@ -18,6 +18,13 @@ ollama pull qwen3:8b         # about 5 GB, once
 ```
 The app looks for the model at `http://localhost:11434` (change with the `OLLAMA_URL` environment variable).
 
+**Pre-generated GenAI answers (server without the model).** `LLM_MODE` chooses where GenAI answers come from:
+- `live` (default): ask Ollama.
+- `record`: ask Ollama and store each answer in `prototype/config/llm_replay.jsonl`, keyed by the exact prompt.
+- `replay`: answer only from that file, never calling a model. The page says the answers were pre-generated locally; a case that was not recorded (another option chosen, changed weights, own policy sentence) shows the rule's facts only.
+
+To re-record (needs `ollama serve` and qwen3:8b; resumable): `cd prototype && LLM_MODE=record python3 -m evaluation.pregenerate`. It covers the Demo path (including the approved policy and the rest of ward 1), every sick call from week 1 when the rule's choice is accepted, the first 10 sick calls for start weeks 2-7, two extra policy sentences, and the monthly reports (`--wards 0 1 2` limits the wards). The file in the repo (546 answers) covers the Demo path and wards 1-3 in full, plus week 1 of ward 4 without its monthly report; ward 5 shows the rule's facts only. In `record` and `replay` the monthly report leaves out the live planner log, so its table matches the recording.
+
 **Start the app.**
 ```bash
 cd prototype

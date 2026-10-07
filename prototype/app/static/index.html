@@ -24,7 +24,7 @@
     <button id="btn-demo" type="button" title="Ward 1, day 4: Nurse 43 calls in sick. Same case every time.">Demo</button>
   </span>
   <span id="llm-status" class="llm-status x-presenter"></span>
-  <span class="x-expert"><label>Seed <input id="seed" type="number" value="0" min="0"></label>
+  <span id="seed-box" class="x-expert"><label>Seed <input id="seed" type="number" value="0" min="0"></label>
     <button id="btn-new">New scenario</button></span>
   <div class="toggle x-expert">
     <button class="mode" data-mode="baseline">Baseline: Today's software (ORTEC-style)</button>
@@ -154,7 +154,7 @@
     <menu><button value="cancel">Cancel</button><button value="ok" class="primary">Apply</button></menu>
   </form>
 </dialog>
-<footer class="foot" id="foot">Simulated wards built from Erasmus MC and Dutch parameters · GenAI runs locally (qwen3:8b) · the hospital rule ranks, the planner decides</footer>
+<footer class="foot" id="foot">Simulated wards built from Erasmus MC and Dutch parameters · <span id="foot-genai">GenAI runs locally (qwen3:8b)</span> · the hospital rule ranks, the planner decides</footer>
 <div id="toast"></div>
 <script src="app.js"></script>
 </body>
